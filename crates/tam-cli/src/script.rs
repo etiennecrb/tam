@@ -485,7 +485,7 @@ fn no_response(o: &MemberOutcome) -> String {
         }
         MemberState::Exit if o.provider.is_none() => "no agent ran in it".into(),
         _ => "no turn of its latest run ended with one (not run yet, interrupted, or an agent \
-              that reports none: only Claude does)"
+              that reports none: Claude and pi do)"
             .into(),
     };
     format!("no response from '{}': {why}", o.label)
@@ -598,7 +598,7 @@ mod tests {
             "no response from 'feat': no agent ran in it"
         );
         let o = outcome(MemberState::Ready);
-        assert!(no_response(&o).contains("only Claude"));
+        assert!(no_response(&o).contains("Claude and pi"));
         // With one, the outcome renders it whole.
         let mut o = outcome(MemberState::Ready);
         o.response = Some(AgentResponse {

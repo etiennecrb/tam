@@ -31,7 +31,7 @@ The members of a task work from one brief: the reference you give with `tam new 
 
 ## Reading each other's worktrees
 
-An agent can also read the other members' worktrees without asking, but not edit them: tam adds them to the session's directories with a rule denying edits there, which covers Claude's file tools and the file commands it recognises in shell commands, not every program a command may run. A member that joined after the agent started is readable from the agent's next start. The task's directory is open to the agent as its worktree is: edits there follow its permission mode.
+An agent can also read the other members' worktrees without asking, but not edit them: tam adds them to the session's directories with a rule denying edits there, which covers Claude's file tools and the file commands it recognises in shell commands, not every program a command may run. A member that joined after the agent started is readable from the agent's next start. The task's directory is open to the agent as its worktree is: edits there follow its permission mode. This is Claude Code's: [pi](pi.md) has no such rule, and the note it gets at its session start claims no more than you can do.
 
 ## One prompt, several repositories
 

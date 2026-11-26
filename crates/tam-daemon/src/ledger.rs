@@ -163,9 +163,12 @@ pub enum LedgerEvent {
         dir: PathBuf,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
-        /// The Claude session it was made from, resumed by its first agent.
+        /// The session it was made from, resumed by its first agent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// The agent it runs. Chats from before pi have none: Claude's.
+        #[serde(default = "tam_proto::default_provider")]
+        provider: String,
         timestamp: u64,
     },
     /// The chat's name changed (`None`: unnamed). Only the latest is kept.
@@ -308,6 +311,8 @@ struct ChatRecord {
     name: Option<String>,
     /// The session it was made from.
     session: Option<String>,
+    /// The agent it runs (`[agent] program` when it was made).
+    provider: String,
     created_at: u64,
     keep: bool,
     last_turn_at: Option<u64>,
@@ -546,6 +551,18 @@ impl Ledger {
             .history(id)
             .map(|h| h.runs.clone())
             .unwrap_or_default()
+    }
+
+    /// The session of the member's (or chat's) open run, if it is running
+    /// in one.
+    pub fn open_run_session(&self, member: &str) -> Option<&str> {
+        self.state
+            .history(member)?
+            .runs
+            .last()
+            .filter(|run| run.ended_at.is_none())?
+            .session_id
+            .as_deref()
     }
 
     /// Whether the member (or chat) has a run with no end recorded.
@@ -1162,6 +1179,7 @@ impl State {
                 dir,
                 name,
                 session,
+                provider,
                 timestamp,
             } => {
                 if self.chats.contains_key(chat) || self.members.contains_key(chat) {
@@ -1172,6 +1190,7 @@ impl State {
                     dir: dir.clone(),
                     name: name.clone(),
                     session: session.clone(),
+                    provider: provider.clone(),
                     created_at: *timestamp,
                     keep: false,
                     last_turn_at: None,
@@ -1268,6 +1287,7 @@ impl State {
         ChatInfo {
             id: chat.id.clone(),
             name: chat.name.clone(),
+            provider: chat.provider.clone(),
             repo: chat
                 .dir
                 .file_name()
@@ -1276,7 +1296,7 @@ impl State {
             dir: chat.dir.clone(),
             created_at: chat.created_at,
             keep: chat.keep,
-            session: self.current_session(&chat.id, CLAUDE),
+            session: self.current_session(&chat.id, &chat.provider),
             last_turn_at: chat.last_turn_at,
             closes_at: self.closes_at(chat),
             run_count: chat.history.runs.len(),
@@ -1522,10 +1542,7 @@ impl Owner {
     }
 }
 
-/// The agent a chat runs (and whose sessions it is made from).
-const CLAUDE: &str = "claude";
-
-/// Chats: Claude sessions on a repository's main checkout. Their agents'
+/// Chats: agent sessions on a repository's main checkout. Their agents'
 /// runs, sessions and messages are recorded as a member's are, by id.
 impl Ledger {
     /// Open chats, in creation order.
@@ -1597,12 +1614,13 @@ impl Ledger {
     }
 
     /// Record a new chat on the repository whose main checkout is `dir`,
-    /// named `name`, made from Claude session `session` (`None`: its agent
-    /// starts a new one). Refused for a name another chat has, and for a
-    /// session another chat holds.
+    /// run by `provider`, named `name`, made from its session `session`
+    /// (`None`: its agent starts a new one). Refused for a name another
+    /// chat has, and for a session another chat holds.
     pub fn create_chat(
         &mut self,
         dir: &Path,
+        provider: &str,
         name: Option<&str>,
         session: Option<&str>,
     ) -> Result<ChatInfo> {
@@ -1629,6 +1647,7 @@ impl Ledger {
             dir: dir.to_path_buf(),
             name,
             session: session.map(str::to_string),
+            provider: provider.to_string(),
             timestamp: now(),
         })?;
         Ok(self.chat(&id).expect("chat just created"))
@@ -3725,6 +3744,7 @@ mod tests {
             dir: dir.into(),
             name: None,
             session: session.map(str::to_string),
+            provider: tam_proto::default_provider(),
             timestamp: ts,
         }
     }
@@ -3798,7 +3818,7 @@ mod tests {
         let path = tmp.path().join("ledger.jsonl");
         let mut ledger = open(&tmp);
         let dir = Path::new("/src/api");
-        let chat = ledger.create_chat(dir, None, None).unwrap();
+        let chat = ledger.create_chat(dir, "claude", None, None).unwrap();
         let id = chat.id.clone();
         assert_eq!((chat.title, chat.last_prompt), (None, None));
         let lines = fs::read_to_string(&path).unwrap();
@@ -3909,7 +3929,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut ledger = open(&tmp);
         let dir = Path::new("/src/api");
-        let one = ledger.create_chat(dir, Some("  debug "), None).unwrap();
+        let one = ledger
+            .create_chat(dir, "claude", Some("  debug "), None)
+            .unwrap();
         assert!(
             one.id.starts_with("c-") && is_chat_id(&one.id),
             "{}",
@@ -3917,7 +3939,9 @@ mod tests {
         );
         assert_eq!(one.name.as_deref(), Some("debug"));
         // Several chats on one repository.
-        let two = ledger.create_chat(dir, None, Some("s-1")).unwrap();
+        let two = ledger
+            .create_chat(dir, "claude", None, Some("s-1"))
+            .unwrap();
         assert_ne!(one.id, two.id);
         for (name, why) in [
             ("debug", "named 'debug' already"),
@@ -3925,7 +3949,9 @@ mod tests {
             ("a\nb", "control characters"),
             ("c-12345678", "reads as a chat id"),
         ] {
-            let err = ledger.create_chat(dir, Some(name), None).unwrap_err();
+            let err = ledger
+                .create_chat(dir, "claude", Some(name), None)
+                .unwrap_err();
             assert!(err.to_string().contains(why), "{name:?}: {err}");
             let err = ledger.rename_chat(&two.id, Some(name)).unwrap_err();
             assert!(err.to_string().contains(why), "{name:?}: {err}");
@@ -3937,12 +3963,16 @@ mod tests {
         assert!(!ledger.keep_chat(&one.id, false).unwrap());
         assert!(ledger.keep_chat(&one.id, true).unwrap());
         // A session another chat holds.
-        let err = ledger.create_chat(dir, None, Some("s-1")).unwrap_err();
+        let err = ledger
+            .create_chat(dir, "claude", None, Some("s-1"))
+            .unwrap_err();
         assert!(err.to_string().contains("already"), "{err}");
-        assert!(ledger.create_chat(dir, None, Some(" ")).is_err());
+        assert!(ledger.create_chat(dir, "claude", None, Some(" ")).is_err());
         // Closed, it holds nothing: the chat can be made again from it.
         ledger.close_chat(&two.id).unwrap();
-        let again = ledger.create_chat(dir, None, Some("s-1")).unwrap();
+        let again = ledger
+            .create_chat(dir, "claude", None, Some("s-1"))
+            .unwrap();
         assert_eq!(again.session.as_deref(), Some("s-1"));
         assert_ne!(again.id, two.id);
         assert!(ledger.chat(&two.id).is_none());
@@ -3965,7 +3995,7 @@ mod tests {
         let mut ledger = open(&tmp);
         let m = create(&mut ledger, "feat", "/w/app--feat");
         let chat = ledger
-            .create_chat(Path::new("/src/app"), Some("debug"), Some("s-0"))
+            .create_chat(Path::new("/src/app"), "claude", Some("debug"), Some("s-0"))
             .unwrap();
         let c = chat.id.as_str();
         assert_eq!(ledger.current_session(c, "claude").as_deref(), Some("s-0"));
@@ -4051,10 +4081,10 @@ mod tests {
         let mut ledger = open(&tmp);
         // Named before a task took the name: the task comes after.
         let feat = ledger
-            .create_chat(Path::new("/src/api"), Some("feat"), None)
+            .create_chat(Path::new("/src/api"), "claude", Some("feat"), None)
             .unwrap();
         ledger
-            .create_chat(Path::new("/src/api"), Some("feat/api"), None)
+            .create_chat(Path::new("/src/api"), "claude", Some("feat/api"), None)
             .unwrap();
         let task = ledger
             .create_task(
@@ -4079,14 +4109,14 @@ mod tests {
         // Once the task is there, no chat takes its name.
         for name in ["feat", "feat/web", "feat/anything"] {
             let err = ledger
-                .create_chat(Path::new("/src/api"), Some(name), None)
+                .create_chat(Path::new("/src/api"), "claude", Some(name), None)
                 .unwrap_err();
             assert!(err.to_string().contains("would name task 'feat'"), "{err}");
             let err = ledger.rename_chat(&feat.id, Some(name)).unwrap_err();
             assert!(err.to_string().contains("would name task 'feat'"), "{err}");
         }
         let other = ledger
-            .create_chat(Path::new("/src/api"), Some("feature"), None)
+            .create_chat(Path::new("/src/api"), "claude", Some("feature"), None)
             .unwrap();
         // A chat's name is no task member's either.
         let err = ledger.resolve("feature").unwrap_err();

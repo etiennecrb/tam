@@ -1,6 +1,6 @@
 # Tasks
 
-A **task** is a named unit of work. tam creates a git worktree for it, on a branch named after the task, starts a Claude Code agent there, and `tam drop` cleans it up.
+A **task** is a named unit of work. tam creates a git worktree for it, on a branch named after the task, starts an agent there (Claude Code, or [pi](pi.md)), and `tam drop` cleans it up.
 
 A **member** is a task's worktree, with at most one agent session. A task can hold several members, one per repository, for work spanning e.g. a backend and a frontend: `tam new feat -r api -r web` creates both worktrees, on branch `feat`, and starts an agent in each. Members have a stable id, which is also their agent's id (`$TAM_AGENT_ID`), and a short name within the task: the repository name. Name one as `TASK/MEMBER`; a bare task name means its only member.
 

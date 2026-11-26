@@ -8,6 +8,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize, Default)]
 pub struct ConfigFile {
     pub spawn: Option<SpawnConfig>,
+    pub agent: Option<AgentConfig>,
     pub session: Option<SessionConfig>,
     pub tui: Option<TuiConfig>,
 }
@@ -15,6 +16,12 @@ pub struct ConfigFile {
 #[derive(Debug, Deserialize)]
 pub struct SpawnConfig {
     pub wrapper: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentConfig {
+    /// The program every agent runs: `claude` (the default) or `pi`.
+    pub program: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +63,10 @@ pub struct Config {
     /// `["direnv", "exec", "."]`: the worktree's dev environment). Empty:
     /// none.
     pub wrapper: Vec<String>,
+    /// The agent `tam new`, `tam run`, `tam chat` and the dashboard start:
+    /// `claude` (the default) or `pi`. A chat keeps the one it was made
+    /// with.
+    pub agent: String,
 }
 
 impl Default for Config {
@@ -66,9 +77,14 @@ impl Default for Config {
             theme: None,
             animate: true,
             wrapper: Vec::new(),
+            agent: tam_proto::default_provider(),
         }
     }
 }
+
+/// The agents a client starts. Not a path or another program: those get no
+/// hooks, no sessions and no messages, which nothing would say.
+pub const AGENTS: [&str; 2] = ["claude", "pi"];
 
 pub fn parse_config(toml_str: &str) -> Result<Config> {
     let file: ConfigFile = toml::from_str(toml_str)?;
@@ -102,12 +118,35 @@ pub fn parse_config(toml_str: &str) -> Result<Config> {
         anyhow::bail!("spawn.wrapper: the first word must be the command to run");
     }
 
+    let agent = match file.agent.as_ref().and_then(|a| a.program.as_deref()) {
+        None => tam_proto::default_provider(),
+        Some(program) => {
+            let program = program.trim();
+            anyhow::ensure!(
+                !program.is_empty(),
+                "agent.program: the program every agent runs must be named"
+            );
+            anyhow::ensure!(
+                !program.contains(char::is_whitespace),
+                "agent.program: one program, not a command line ('{program}')"
+            );
+            anyhow::ensure!(
+                AGENTS.contains(&program),
+                "agent.program: '{}' is not an agent tam runs ({})",
+                program,
+                AGENTS.join(", ")
+            );
+            program.to_string()
+        }
+    };
+
     Ok(Config {
         finder,
         commands,
         theme,
         animate: file.tui.as_ref().and_then(|t| t.animate).unwrap_or(true),
         wrapper,
+        agent,
     })
 }
 
@@ -327,6 +366,7 @@ mod tests {
     fn defaults() {
         let config = Config::default();
         assert!(config.wrapper.is_empty() && config.animate);
+        assert_eq!(config.agent, "claude");
     }
 
     #[test]
@@ -344,13 +384,32 @@ mod tests {
 
     #[test]
     fn the_retired_default_agent_setting_is_ignored() {
-        // Agents are Claude: configs written for other agents still load.
+        // `[agent] program` replaced it: configs written for other agents
+        // still load, and start Claude.
         let toml = r#"
 [spawn]
 default_agent = "codex"
 "#;
         let config = parse_config(toml).unwrap();
         assert!(config.wrapper.is_empty());
+        assert_eq!(config.agent, "claude");
+    }
+
+    #[test]
+    fn parse_agent_program() {
+        let config = parse_config("[agent]\nprogram = \"pi\"\n").unwrap();
+        assert_eq!(config.agent, "pi");
+        // A program, not a command line.
+        let err = parse_config("[agent]\nprogram = \"pi --model x\"\n").unwrap_err();
+        assert!(err.to_string().contains("agent.program"), "{err}");
+        let err = parse_config("[agent]\nprogram = \" \"\n").unwrap_err();
+        assert!(err.to_string().contains("agent.program"), "{err}");
+        // Only the agents tam drives: another program would get no hooks.
+        let err = parse_config("[agent]\nprogram = \"codex\"\n").unwrap_err();
+        assert!(err.to_string().contains("not an agent"), "{err}");
+        // Ignored keys of other agents' configs still load.
+        let config = parse_config("[agent]\ndefault_agent = \"codex\"\n").unwrap();
+        assert_eq!(config.agent, "claude");
     }
 
     #[test]

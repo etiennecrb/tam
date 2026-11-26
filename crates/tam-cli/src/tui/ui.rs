@@ -308,7 +308,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &mut App) {
             ],
             Mode::RenameChat { .. } => vec![
                 Span::styled(" enter", Style::new().bold()),
-                Span::raw(":rename (empty: Claude's title)  "),
+                Span::raw(":rename (empty: session title)  "),
                 Span::styled("esc", Style::new().bold()),
                 Span::raw(":cancel"),
             ],
@@ -1246,8 +1246,8 @@ fn render_close_chat_popup(frame: &mut Frame, label: &str) {
             Span::raw("?"),
         ]),
         Line::raw("Its agent stops and tam forgets the chat. Nothing on"),
-        Line::raw("disk changes, and Claude keeps the session: c makes the"),
-        Line::raw("chat again from the repository's history."),
+        Line::raw("disk changes, and the agent keeps the session: c makes"),
+        Line::raw("the chat again from the repository's history."),
         Line::raw(""),
         Line::from(vec![
             red("y"),
@@ -1361,8 +1361,8 @@ fn render_rename_chat_popup(frame: &mut Frame, name: &TextInput, title: Option<&
     frame.render_widget(Span::raw(label), label_area);
     name.render(frame, text, Style::new().bold(), true);
     let hint = match title {
-        Some(title) => format!("empty: Claude's title, {title}"),
-        None => "empty: Claude's title, once it has one".into(),
+        Some(title) => format!("empty: session title, {title}"),
+        None => "empty: session title, once it has one".into(),
     };
     frame.render_widget(Line::raw(hint).fg(theme::get().muted), hint_row);
 }
@@ -3013,6 +3013,7 @@ mod tests {
 
     fn chat_info(id: &str, name: Option<&str>, title: Option<&str>, repo: &str) -> ChatInfo {
         ChatInfo {
+            provider: "claude".into(),
             id: id.into(),
             name: name.map(str::to_string),
             repo: repo.into(),
@@ -3400,7 +3401,7 @@ mod tests {
         let s = screen(&mut app, 100, 30);
         show("close chat", &s);
         assert!(s.contains("Close chat Chat design?"), "{s}");
-        assert!(s.contains("Claude keeps the session"), "{s}");
+        assert!(s.contains("the agent keeps the session"), "{s}");
         assert!(s.contains("y/enter:close"), "{s}");
         app.mode = Mode::RenameChat {
             id: "c-0000dddd".into(),
@@ -3411,7 +3412,7 @@ mod tests {
         let (s, cursor) = screen_and_cursor(&mut app, 100, 30);
         show("rename chat", &s);
         assert!(s.contains("Name: dashboard"), "{s}");
-        assert!(s.contains("empty: Claude's title, Chat design"), "{s}");
+        assert!(s.contains("empty: session title, Chat design"), "{s}");
         assert!(cursor.is_some());
     }
 

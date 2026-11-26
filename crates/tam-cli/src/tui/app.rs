@@ -93,7 +93,7 @@ pub enum Mode {
         id: String,
         label: String,
     },
-    /// A chat's name; empty: Claude's title (`title`) again.
+    /// A chat's name; empty: its session's title (`title`) again.
     RenameChat {
         id: String,
         label: String,
@@ -340,7 +340,8 @@ impl<'a> Focused<'a> {
                 chat.info.label(),
                 &chat.info.id,
                 chat.info.dir.as_path(),
-                provider(chat.agent.as_ref()).unwrap_or_default(),
+                // Its own agent, running or not.
+                chat.info.provider.clone(),
             ),
             Focused::Shell(_, Some((task, member))) => {
                 Focused::Member(task, member).command_values()
@@ -1095,15 +1096,16 @@ impl App {
         self.tasks.iter().find_map(|t| t.member(id).map(|m| (t, m)))
     }
 
+    /// A chat, by id.
+    pub fn find_chat(&self, id: &str) -> Option<&Chat> {
+        self.chats.iter().find(|c| c.info.id == id)
+    }
+
     /// A running agent, by id (a member's or a chat's).
     pub fn find_agent(&self, id: &str) -> Option<&AgentInfo> {
         match self.find_member(id) {
             Some((_, member)) => member.agent_info.as_ref(),
-            None => self
-                .chats
-                .iter()
-                .find(|c| c.info.id == id)
-                .and_then(|c| c.agent.as_ref()),
+            None => self.find_chat(id).and_then(|c| c.agent.as_ref()),
         }
     }
 

@@ -18,9 +18,9 @@ tam split TASK/MEMBER --json   Split a member out; print who moved where
 
 ## Waiting and results
 
-`tam new` and `tam run` attach only when stdin and stdout are terminals: otherwise they start the agent and say so. `tam wait` returns once each agent is in one of the `--until` states, comma-separated: `working`, `blocked`, `ready`, `idle`, `question`, `error`, `exit` (no agent runs). The default is any state but `working`. `ready` (`input`, its former name, still works) takes in `idle`, since agents without hooks never report `ready`. It gives up at once when an agent exits or its turn fails, unless `--until` takes `exit` or `error`. `tam result` prints the response that ended the agent's last turn, in full; it is still there once the agent exited, or the daemon restarted. There is none while a turn runs, before the first turn of a run ends, after a failed or interrupted turn, and for agents other than Claude. For `wait` and `result`, NAME is a task (all its members), TASK/MEMBER, a member id, or a chat. Both report what they find: right after `tam msg`, an agent that has not picked the message up yet is still `ready`, with its previous response. `tam msg --wait` waits for the reply instead, and `response_at` tells when a response came.
+`tam new` and `tam run` attach only when stdin and stdout are terminals: otherwise they start the agent and say so. `tam wait` returns once each agent is in one of the `--until` states, comma-separated: `working`, `blocked`, `ready`, `idle`, `question`, `error`, `exit` (no agent runs). The default is any state but `working`. `ready` (`input`, its former name, still works) takes in `idle`, since agents without hooks never report `ready`. It gives up at once when an agent exits or its turn fails, unless `--until` takes `exit` or `error`. `tam result` prints the response that ended the agent's last turn, in full; it is still there once the agent exited, or the daemon restarted. There is none while a turn runs, before the first turn of a run ends, after a failed or interrupted turn, and for agents other than Claude and pi. For `wait` and `result`, NAME is a task (all its members), TASK/MEMBER, a member id, or a chat. Both report what they find: right after `tam msg`, an agent that has not picked the message up yet is still `ready`, with its previous response. `tam msg --wait` waits for the reply instead, and `response_at` tells when a response came.
 
-Claude asks whether to trust a folder it does not know yet, and runs no hook until it is answered: a detached agent in a new worktree waits there (`tam wait` sees `ready` after 10s, and `tam result` has nothing). Attach once to answer it.
+Claude Code and pi both ask whether to trust a folder they do not know yet, and neither reports a turn until it is answered: a detached agent in a new worktree waits there (`tam wait` sees `ready` after 10s, and `tam result` has nothing). Attach once to answer it.
 
 ## Exit statuses
 
@@ -95,6 +95,7 @@ With `--json`, stdout holds one JSON document and nothing else, also when the co
       "last_prompt": "why is CI red?",
       "repo": "app",
       "dir": "/home/me/src/app",
+      "provider": "claude",
       "status": "ready",
       "keep": false,
       "closes_at": 1763659200,
@@ -141,7 +142,7 @@ With `--json`, stdout holds one JSON document and nothing else, also when the co
 - `pending` (while `blocked` or `question`) is `{"tool", "summary"}`, `turn_error` (while `error`) `{"kind", "message"}`, `denied` (the last tool call auto mode refused in this turn) `{"tool", "summary", "reason"}`.
 - `session_id` is the running agent's session, else the last run's. `last_message` is the start of the agent's last response: `tam result` has all of it. A run's `exit_code` is -1 when it was stopped.
 - `health` is what the daemon saw in git: `{"state": "ok", "branch"}`, `{"state": "gone", "cannot_repair"}` or `{"state": "broken", "problem"}`; `null` until checked.
-- A chat's `id` is how to name it to tam; `label` is how tam shows it (its `name`, else its `title`, else its id) and may not be a name tam takes back. `title` (the user's `/rename`, else Claude's title) and `last_prompt` come from Claude's files of the session it is in. `status` is its agent's (`run`, `ready`, `block`, `question`, `error`), else `idle`. `last_turn_at` is when the user last prompted its agent; `closes_at` when autoclean closes it (`null` when kept, or autoclean is off); `session_id` the running agent's session, else the one it resumes next. The keys from `agent` on are those of a task member.
+- A chat's `id` is how to name it to tam; `label` is how tam shows it (its `name`, else its `title`, else its id) and may not be a name tam takes back. `title` (the user's `/rename`, else Claude's title; pi generates none) and `last_prompt` come from the files of its agent, of the session it is in; `provider` is that agent (`claude` or `pi`). `status` is its agent's (`run`, `ready`, `block`, `question`, `error`), else `idle`. `last_turn_at` is when the user last prompted its agent; `closes_at` when autoclean closes it (`null` when kept, or autoclean is off); `session_id` the running agent's session, else the one it resumes next. The keys from `agent` on are those of a task member.
 - A shell's `id` is how to name it to tam (`tam attach`, `tam stop`); `name` is how tam shows it, `Shell #` and its `number` among the shells of its place. `task` and `member` are those of the worktree it runs in, `null` on a main checkout; `pid` its process's (the wrapper's, which `exec`s the shell); `viewers` the clients attached to it or typing into it. A shell has no status.
 - Before version 1, `tam ps --json` printed the `tasks` array alone, with the keys up to `last_activity` (tasks) and `health` (members).
 

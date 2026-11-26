@@ -345,10 +345,8 @@ impl Provider for ClaudeProvider {
     }
 
     fn session_exists(&self, session: &str) -> bool {
-        match crate::sessions::claude_dir() {
-            Some(dir) => claude_transcript_exists(&dir, session),
-            None => true,
-        }
+        // One reader of Claude's files: `sessions` (a chat reads them too).
+        crate::sessions::claude_session_anywhere(session)
     }
 
     fn inbox_hook(&self) -> bool {
@@ -581,22 +579,6 @@ struct ClaudeUsage {
     cache_read_input_tokens: u64,
 }
 
-/// Whether a transcript of `session` is in one of Claude's project
-/// directories (`<claude dir>/projects/<encoded cwd>/<session>.jsonl`).
-/// Every project is looked at: the encoding of the directory is Claude's.
-fn claude_transcript_exists(claude_dir: &Path, session: &str) -> bool {
-    if session.is_empty() || session.contains(['/', '\\']) || session.starts_with('.') {
-        return false;
-    }
-    let file = format!("{session}.jsonl");
-    let Ok(projects) = std::fs::read_dir(claude_dir.join("projects")) else {
-        return false;
-    };
-    projects
-        .filter_map(|e| e.ok())
-        .any(|project| project.path().join(&file).is_file())
-}
-
 /// Context window of a Claude session, in tokens. Neither the transcript nor
 /// the hooks say what it is; current models have 1M.
 const CLAUDE_CONTEXT_LIMIT: u64 = 1_000_000;
@@ -682,6 +664,174 @@ fn find_last_usage(content: &str) -> Option<(ClaudeUsage, Option<String>)> {
     None
 }
 
+// --- pi ---
+
+/// The extension tam writes for pi and loads with `--extension`.
+const PI_EXTENSION: &str = include_str!("pi_extension.js");
+
+/// How long a working pi agent's PTY may stay silent before it is taken as
+/// back at the prompt: pi draws its spinner while a turn runs, nothing at
+/// the prompt. Claude's guess, and the backstop for a turn that ends
+/// without `agent_settled` (an interrupt).
+const PI_SILENT_WORKING_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A `pi` agent (pi.dev). pi has no hooks of its own: tam writes an
+/// extension (`PI_EXTENSION`) into its data directory and loads it at
+/// every start. The extension forwards pi's events to the daemon in the
+/// payload shape of Claude's hooks, which `claude_handle_hook` reads, so
+/// state, sessions, peer notes and messages work as for Claude. pi has no
+/// permission dialogs, no plan mode and no question tool: a pi agent is
+/// never blocked or asked a question through tam, and the dashboard's `a`
+/// has nothing to answer. Context use is not shown: pi's session file has
+/// the tokens but not the model's limit.
+pub struct PiProvider {
+    /// The executable the extension runs (`hook-notify`, `inbox-wait`).
+    /// `None` (`current_exe` failed): no extension, so no hooks.
+    program: Option<PathBuf>,
+    /// Where the extension is written (`$XDG_DATA_HOME/tam/agents/pi.js`).
+    extension: Option<PathBuf>,
+}
+
+impl PiProvider {
+    /// The provider of the agents a daemon starts: the extension calls back
+    /// into this executable.
+    pub fn with_current_exe() -> Self {
+        Self {
+            program: std::env::current_exe().ok(),
+            extension: pi_extension_path(),
+        }
+    }
+
+    /// For tests: the extension goes to `extension`, not the data
+    /// directory.
+    #[cfg(test)]
+    fn at(program: PathBuf, extension: PathBuf) -> Self {
+        Self {
+            program: Some(program),
+            extension: Some(extension),
+        }
+    }
+
+    /// Write the extension (again only when what it would hold changed) and
+    /// return its path. `None` when it cannot be written: that agent gets no
+    /// hooks, which the daemon's log says.
+    fn write_extension(&self) -> Option<PathBuf> {
+        let (Some(program), Some(path)) = (self.program.as_ref(), self.extension.as_ref()) else {
+            return None;
+        };
+        let js = PI_EXTENSION.replace("__TAM_PROGRAM__", &json_string(&program.to_string_lossy()));
+        if std::fs::read_to_string(path).ok().as_deref() != Some(js.as_str()) {
+            if let Err(e) = write_atomically(path, &js) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "cannot write tam's pi extension: this agent gets no hooks"
+                );
+                return None;
+            }
+        }
+        Some(path.clone())
+    }
+}
+
+impl Provider for PiProvider {
+    fn name(&self) -> &str {
+        "pi"
+    }
+
+    fn build_command(
+        &self,
+        dir: &Path,
+        args: &[String],
+        resume_session: Option<&str>,
+        prompt: Option<&str>,
+    ) -> Command {
+        let mut cmd = Command::new("pi");
+        cmd.current_dir(dir);
+        if let Some(extension) = self.write_extension() {
+            cmd.arg("--extension").arg(extension);
+        }
+        if let Some(id) = resume_session {
+            cmd.arg("--session").arg(id);
+        }
+        cmd.args(args);
+        if let Some(text) = prompt {
+            // Options end here: a prompt may begin with `-`.
+            cmd.arg("--").arg(text);
+        }
+        cmd
+    }
+
+    fn detect_state_from_output(
+        &self,
+        _recent_output: &[u8],
+        _idle_duration: Duration,
+    ) -> Option<AgentState> {
+        // pi reports through the extension, as Claude through its hooks.
+        None
+    }
+
+    fn handle_hook(
+        &self,
+        event: &str,
+        payload: Option<&Value>,
+        current: AgentState,
+        data: &mut HookData,
+    ) -> HookResult {
+        // tam's extension sends Claude's payloads (see the extension).
+        claude_handle_hook(event, payload.unwrap_or(&Value::Null), current, data)
+    }
+
+    fn silent_working_timeout(&self) -> Option<Duration> {
+        Some(PI_SILENT_WORKING_TIMEOUT)
+    }
+
+    fn can_resume(&self) -> bool {
+        true
+    }
+
+    fn reports_sessions(&self) -> bool {
+        true
+    }
+
+    fn session_exists(&self, session: &str) -> bool {
+        // One reader of pi's directories: `sessions` (a chat reads them too).
+        crate::sessions::pi_session_anywhere(session)
+    }
+
+    fn inbox_hook(&self) -> bool {
+        self.program.is_some()
+    }
+}
+
+/// Where tam writes the extension its pi agents load.
+fn pi_extension_path() -> Option<PathBuf> {
+    Some(
+        tam_worktree::xdg::data_home()?
+            .join("tam")
+            .join("agents")
+            .join("pi.js"),
+    )
+}
+
+/// Write `contents` to `path` so that a reader sees the old file or the new
+/// one, never half of either: another spawn's `pi` may load it meanwhile.
+fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = parent.join(format!(".{name}.tmp"));
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// `s` as a JavaScript string literal (JSON's escaping is JavaScript's).
+fn json_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 /// Any program run as an agent: what tam's tests start in place of Claude
 /// (`sleep`, `sh`). No client offers it. The provider's name is the
 /// command; its state is guessed from the PTY's activity.
@@ -734,6 +884,7 @@ impl Provider for GenericProvider {
 pub fn resolve(name: &str) -> Box<dyn Provider> {
     match name {
         "claude" => Box::new(ClaudeProvider::with_current_exe()),
+        "pi" => Box::new(PiProvider::with_current_exe()),
         other => Box::new(GenericProvider::new(other)),
     }
 }
@@ -749,7 +900,8 @@ pub struct TaskAccess {
 }
 
 /// Whether the agent `name` is given a member's `TaskAccess` (Claude only:
-/// a plain program gets nothing more than its worktree).
+/// pi has no way to grant a directory or deny edits to one, so its agents
+/// get nothing more than their worktree).
 pub fn grants_access(name: &str) -> bool {
     name == "claude"
 }
@@ -881,6 +1033,89 @@ mod tests {
     fn resolve_claude() {
         let p = resolve("claude");
         assert_eq!(p.name(), "claude");
+    }
+
+    #[test]
+    fn resolve_pi() {
+        let p = resolve("pi");
+        assert_eq!(p.name(), "pi");
+        // A member's access is Claude's: pi cannot deny edits to a directory.
+        assert!(!grants_access("pi"));
+        assert_eq!(resolve_with("pi", Some(TaskAccess::default())).name(), "pi");
+    }
+
+    fn pi_provider() -> (PiProvider, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        (
+            PiProvider::at(PathBuf::from("/opt/tam"), dir.path().join("pi.js")),
+            dir,
+        )
+    }
+
+    #[test]
+    fn pi_provider_basics() {
+        let (p, dir) = pi_provider();
+        assert_eq!(p.name(), "pi");
+
+        let cmd = p.build_command(Path::new("/tmp"), &["--model".into()], None, None);
+        assert_eq!(cmd.get_program(), "pi");
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/tmp")));
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let extension = dir.path().join("pi.js");
+        assert_eq!(
+            args,
+            [
+                "--extension".to_string(),
+                extension.display().to_string(),
+                "--model".to_string()
+            ]
+        );
+        assert!(p.can_resume() && p.reports_sessions() && p.inbox_hook());
+        assert!(p.silent_working_timeout().is_some());
+        assert!(p
+            .detect_state_from_output(b"Out?", Duration::from_secs(60))
+            .is_none());
+    }
+
+    #[test]
+    fn pi_resumes_a_session_and_takes_a_prompt_after_a_double_dash() {
+        let (p, _dir) = pi_provider();
+        let cmd = p.build_command(Path::new("/tmp"), &[], Some("abc-123"), Some("-fix this"));
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.ends_with(&[
+            "--session".to_string(),
+            "abc-123".to_string(),
+            "--".to_string(),
+            "-fix this".to_string()
+        ]));
+    }
+
+    #[test]
+    fn pi_extension_calls_back_into_this_tam() {
+        let (p, dir) = pi_provider();
+        p.write_extension().unwrap();
+        let js = std::fs::read_to_string(dir.path().join("pi.js")).unwrap();
+        assert!(js.contains(r#"const TAM = "/opt/tam";"#), "{js}");
+        assert!(!js.contains("__TAM_PROGRAM__"));
+        assert!(js.contains("\"hook-notify\"") && js.contains("\"inbox-wait\""));
+        assert!(js.contains("sendUserMessage") && js.contains("tool_execution_end"));
+        // Written again only when the program changes.
+        let before = std::fs::metadata(dir.path().join("pi.js"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        p.write_extension().unwrap();
+        let after = std::fs::metadata(dir.path().join("pi.js"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(before, after);
     }
 
     #[test]
@@ -1171,8 +1406,9 @@ mod tests {
     }
 
     #[test]
-    fn only_claude_has_silent_working_timeout() {
+    fn only_hook_providers_have_silent_working_timeout() {
         assert!(ClaudeProvider::new(None).silent_working_timeout().is_some());
+        assert!(resolve("pi").silent_working_timeout().is_some());
         assert!(GenericProvider::new("x").silent_working_timeout().is_none());
     }
 
@@ -1333,26 +1569,6 @@ mod tests {
         let generic = GenericProvider::new("sh");
         assert!(!generic.can_resume() && !generic.reports_sessions());
         assert!(generic.session_exists("anything"));
-    }
-
-    #[test]
-    fn claude_transcripts_are_found_in_any_project() {
-        let tmp = tempfile::tempdir().unwrap();
-        let claude = tmp.path();
-        assert!(!claude_transcript_exists(claude, "s1"), "no projects dir");
-        let project = claude.join("projects").join("-w-app-feat");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(project.join("s1.jsonl"), "{}\n").unwrap();
-        std::fs::create_dir_all(claude.join("projects").join("-w-other")).unwrap();
-
-        assert!(claude_transcript_exists(claude, "s1"));
-        assert!(!claude_transcript_exists(claude, "s2"));
-        // Not a session id: never looked up as a path.
-        assert!(!claude_transcript_exists(claude, ""));
-        assert!(!claude_transcript_exists(
-            claude,
-            "../projects/-w-app-feat/s1"
-        ));
     }
 
     #[test]

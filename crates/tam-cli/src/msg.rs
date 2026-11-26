@@ -1,5 +1,5 @@
 //! Messages between task members: `tam msg`, `tam history`, and `tam
-//! inbox-wait` (the inbox hook of the Claude agents tam spawns).
+//! inbox-wait` (the inbox hook of the agents tam spawns).
 
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
@@ -284,7 +284,7 @@ fn excerpt(text: &str) -> String {
 }
 
 /// `tam inbox-wait`, run in the background by the inbox hooks tam injects
-/// into Claude agents: wait for the agent's messages and print them on
+/// into the agents it spawns: wait for the agent's messages and print them on
 /// stderr, exiting 2 so that Claude shows them to the model (waking it when
 /// idle). Exits 0 quietly when there is nothing to deliver: no agent id, no
 /// daemon (never starts one), or another inbox hook took over.

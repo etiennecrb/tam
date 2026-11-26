@@ -10,7 +10,7 @@ User documentation: `README.md` is for a first-time user only (what tam is,
 install, quick start, the dashboard's main keys, concepts, a command table,
 links); keep it short. The reference is `docs/`, one page per topic
 (`tasks`, `dashboard`, `chats`, `shells`, `collaboration`, `scripting`,
-`configuration`, `claude-code`, indexed by `docs/README.md`): a feature's
+`configuration`, `claude-code`, `pi`, indexed by `docs/README.md`): a feature's
 documentation goes there, and the README at most links to it. The `--help`
 strings' "see README, Scripting" lands on the README's short Scripting
 section, which links to `docs/scripting.md`. Screenshots, recordings and the
@@ -166,8 +166,10 @@ adopt). `tam-cli` depends on all three.
   the variables a Claude session sets for its commands, by name, since its
   settings such as `CLAUDE_CONFIG_DIR` must pass: a session started with
   them counts as nested and writes no transcript, and the messaging token
-  is a secret; the caller's pane or window, `TMUX`, `ZELLIJ*`, …;
-  `COLUMNS`/`LINES`; `PWD`/`OLDPWD`). `Agent::spawn` applies it
+  is a secret; a calling pi session's `PI_SESSION_ID`/`PI_SESSION_FILE`/
+  `PI_PROVIDER`/`PI_MODEL`/`PI_REASONING_LEVEL` (its settings,
+  `PI_CODING_AGENT_DIR`/`PI_CODING_AGENT_SESSION_DIR`, pass); the caller's
+  pane or window, `TMUX`, `ZELLIJ*`, …; `COLUMNS`/`LINES`; `PWD`/`OLDPWD`). `Agent::spawn` applies it
   (`pty::Launch`, in `Pty::spawn`; shells too): `env_clear`, the client's variables (the program is
   looked up on its `PATH`), `TERM=xterm-256color` if it has none or `dumb`,
   `PWD` the worktree, then `TAM_AGENT_ID`/`TAM_SOCKET`, whatever the client
@@ -187,26 +189,70 @@ adopt). `tam-cli` depends on all three.
   worktree, on top of the caller's environment (direnv unloads an `.envrc`
   loaded elsewhere through `DIRENV_DIFF`, which is kept); its output and
   errors are on the agent's screen. A spawn error names it. Not recorded.
-- **The agent is Claude** — the only agent a client starts: no `-a`, no
-  `default_agent` (an old config's is ignored), no AGENT column.
+- **The agents are Claude Code and pi** — the only two a client starts; no
+  `-a`, no `default_agent` (an old config's is ignored), no AGENT column.
+  `[agent] program` in the config (`tam-cli/src/config.rs`, `claude` when
+  unset, and only `claude` or `pi`: another program would get no hooks, no
+  sessions and no messages, so it is a config error) is what
+  `Client::run_agent` sends as `provider`, read at each start;
+  `handle_run_agent` falls back to `claude` for a member, and to the chat's
+  own provider (`ChatInfo::provider`) for a chat.
   `tam-daemon/src/provider.rs` keeps the `Provider` trait for what tests
-  run in Claude's place: `Spawn`/`RunAgent` with `provider` set to a
+  run in their place: `Spawn`/`RunAgent` with `provider` set to a
   program (`sleep`, `sh`) give a `GenericProvider`: state guessed from PTY
   silence (5s), no hooks, so no note, no access, no session, and messages
   wait for the member's next agent (nothing is typed into a PTY for them).
   Old ledgers' runs of other programs still load; `handle_run_agent`
-  starts Claude whatever the member last ran, in Claude's own current
-  session. Claude's state comes from hooks, which
+  starts the configured agent whatever the member last ran, in that
+  agent's own current session. Claude's state comes from hooks, which
   are injected per spawn (`claude --settings`) and run `tam hook-notify`, which
   forwards the hook's JSON input to the daemon (`$TAM_SOCKET`, never starting
   one); `ClaudeProvider::handle_hook` maps it to a state and per-agent
   `AgentDetail`. A working Claude agent silent for 10s falls back to ready
   (interrupted turns fire no hook).
+- **pi** — the same daemon, one provider down. pi has no hooks: tam writes
+  `tam-daemon/src/pi_extension.js` (a `pi` extension, `include_str!`'d,
+  with the `<exe> hook-notify` command in it) to
+  `$XDG_DATA_HOME/tam/agents/pi.js` (again only when what it would hold
+  changed) and passes `pi --extension <file>`, then `--session <id>`, the
+  client's `args` and `-- <prompt>` (a prompt may begin with `-`). The extension runs `tam
+  hook-notify` with Claude's payload shapes, so `PiProvider::handle_hook`
+  is `claude_handle_hook`: `session_start` (`SessionStart`, with pi's
+  reason as Claude's `source`), `before_agent_start` with `messageType
+  "user"` (`UserPromptSubmit`), `tool_execution_end` (not a
+  `parentToolCallId`: `PostToolUse`), `agent_settled` (`Stop` with the last
+  assistant text, `StopFailure` when its `stopReason` is `error`),
+  `session_shutdown` (`SessionEnd`). The `HookContext` a `SessionStart`
+  answers is injected as a hidden custom message from the next
+  `before_agent_start`; a merge note answered on `PostToolUse` goes through
+  `pi.sendMessage(..., { deliverAs: "steer" })`; `session_compact` reports
+  `SessionStart` again. Messages: the extension holds `tam inbox-wait` as a
+  child of pi (stdin ignored, stderr captured), armed at `session_start` and
+  `agent_settled`, one at a time (the daemon makes the newest waiter win);
+  on exit 2 its stderr becomes `pi.sendUserMessage`, which starts a turn and
+  shows the message ids to the daemon as the prompt does for Claude. The
+  `SessionStart` note is held for the next run's first message, with what
+  the daemon answers `UserPromptSubmit` (a merge note), in one hidden
+  message; a session start while a run goes (a prompt on the command line)
+  injects it instead. Sessions: `reports_sessions` and `can_resume` are
+  true; `session_exists` asks `sessions::pi_session_anywhere` (the one
+  reader of pi's directories: `PI_CODING_AGENT_SESSION_DIR`, else the
+  project directories under `sessions` in `PI_CODING_AGENT_DIR`/`~/.pi/agent`).
+  No `TaskAccess` (`grants_access` is
+  Claude's: pi cannot deny edits), no `context_usage` (pi's session file has
+  the tokens, not the model's limit), no answers (`answer.rs` is Claude's
+  `PermissionRequest`; pi asks nothing, so `a` does nothing). Chats run pi
+  too, when it is the configured agent: their sessions, names and history
+  are pi's files (`sessions::pi_*`), and the chat keeps its provider. The
+  extension is written again only when its content changes, and does
+  nothing without `TAM_AGENT_ID`. It is written atomically (another spawn's
+  `pi` may load it meanwhile), and a write that fails is logged: that agent
+  then runs without hooks.
 - **One session per member, resumed by default** — clients start a member's
   agent with `RunAgent { session: current | new | id }` (`handle_run_agent`):
   the daemon picks the session, then spawns as usual. The current session
-  of a member is derived, not stored: the session of its latest
-  Claude run that has one (`Ledger::current_session`). A run's session
+  of a member is derived, not stored: the session of its latest run of
+  that agent that has one (`Ledger::current_session`). A run's session
   is the one it resumed, or the last one the agent's hooks showed a turn in
   (`HookData::resumable_session` → `Ledger::session_reported`:
   `AgentSessionIdentified`, then `AgentSessionChanged` on e.g. `/clear`). A
@@ -301,7 +347,11 @@ adopt). `tam-cli` depends on all three.
 - **Testing hooks by hand** — run the dev daemon with temp `XDG_RUNTIME_DIR`
   (short path: Unix socket limit), `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, and
   `TAM_AGENT_ID`/`TAM_SOCKET` unset. From inside a Claude session also unset the
-  `CLAUDE*` variables, or nested Claude sessions write no transcript.
+  `CLAUDE*` variables, or nested Claude sessions write no transcript; from
+  inside pi unset `PI_SESSION_ID`/`PI_SESSION_FILE` (a pi agent started nested
+  is fine: the daemon strips what it sets). A pi agent needs
+  `[agent] program = "pi"` in that config, and a fake `pi` on the daemon's or
+  the client's `PATH` works the same way (`crates/tam-daemon/tests/pi.rs`).
 - **Config** — `$XDG_CONFIG_HOME/tam/config.toml`, else `~/.config/tam/config.toml`
   (global), `.tam.toml` (per-repo init). The same on every platform (#73):
   `tam_worktree::config::config_path` is the one place that says where, for
@@ -717,10 +767,16 @@ adopt). `tam-cli` depends on all three.
   on, so the note says which peers it can read) until its next start. A drop
   of one member checks under its claim that the member is still in the task it
   claimed.
-- **Chats (#63, tracking #70)** — a Claude session on a repository's main
+- **Chats (#63, tracking #70)** — an agent session on a repository's main
   checkout, started from tam: it owns nothing on disk (no worktree, no
   branch), several run on one repository at once. Its own kind of object,
-  not a task with a flag. Ledger: `ChatCreated { chat, dir, name, session }`,
+  not a task with a flag, and it keeps the agent it was made with: the
+  client sends `CreateChat.provider` from `[agent] program` (Claude when it
+  names none, and for chats from before pi) and `ChatInfo.provider` is what
+  `RunAgent` sends for it, so its sessions, title and history stay one
+  agent's (`sessions::read/history/session_file` take the agent). Ledger:
+  `ChatCreated { chat, dir, name, session, provider }` (`serde(default)`:
+  Claude's),
   `ChatRenamed`, `ChatKept`, `ChatTurn`, `ChatClosed`; the id (`c-xxxxxxxx`) is
   its agent's id and `$TAM_AGENT_ID`. Its agent's runs, sessions and messages
   are the member events with the chat id in `member`/`to`/`from`:
@@ -731,13 +787,14 @@ adopt). `tam-cli` depends on all three.
   member)` or `Chat`) whose `updated()` is `TaskUpdated` or `ChatUpdated`.
   Compaction drops a closed chat's events, keeps only the latest rename, keep
   and turn. Listed in creation order (`ChatRecord::order`). Requests (handlers
-  at the end of `daemon.rs`): `CreateChat { dir, name, session }` records only
-  (`worktrees::check_main_checkout`, the same check as `check_new`; the dir
-  resolved; a session is refused unless Claude's files have it in that
-  checkout's project (`claude_session_of`), and when another chat holds it;
-  checked again at the first start); `RunAgent { member: <chat id> }`
-  starts its agent in the checkout, `Current` being the latest session it
-  had a turn in, else the one it was made from (`ChatInfo::session`); `ListChats`, `GetChat`,
+  at the end of `daemon.rs`): `CreateChat { dir, name, session, provider }`
+  records only (`worktrees::check_main_checkout`, the same check as
+  `check_new`; the dir resolved; a session is refused unless the files of
+  that agent have it run in that checkout (`session_of`), and when another
+  chat holds it; checked again at the first start); `RunAgent { member:
+  <chat id> }` starts its agent in the checkout, that chat's provider when
+  the request names none, `Current` being the latest session it had a turn
+  in, else the one it was made from (`ChatInfo::session`); `ListChats`, `GetChat`,
   `RenameChat`, `KeepChat`, `CloseChat` (agent taken out, `ChatClosed`, then
   killed and waited for outside the lock; replies the chat as it was, with
   its session, to make it again; never touches the checkout, its branch or
@@ -762,27 +819,43 @@ adopt). `tam-cli` depends on all three.
   main checkout find no task, `tam peers` says "not in a task". Notify:
   `{task}` is a chat's label, `{id}` its id; custom commands give the same, `{dir}`
   being the main checkout (see Chats in the dashboard). Titles and history (#64): the daemon's
-  `sessions.rs` is the only reader of Claude's session files
-  (`<claude dir>/projects/<project>/<session>.jsonl`; `project_name` is Claude's
-  encoding: every UTF-16 unit but ASCII letters and digits a `-`, past 200
-  cut and hashed), an undocumented format: a file it cannot read gives
-  nothing. From the last 64 KiB, then the first (`WINDOW`: what Claude reads
-  for its own list, and Claude writes these lines again every 32 KiB): the
-  latest `custom-title` (the user's `/rename`; an empty one takes it back),
-  else the latest `ai-title`; the latest `last-prompt`; the file's mtime.
-  `ChatInfo::title`/`last_prompt` are those of the session the chat is in
-  (`DaemonState::chat_transcript`: its agent's hooks' transcript, else the
-  session its agent resumed, else its current session's file; none for a new
-  session nobody typed in), kept in the ledger's memory
+  `sessions.rs` is the only reader of the agents' session files, both
+  undocumented formats: a file it cannot read gives nothing. Claude's are
+  `<claude dir>/projects/<project>/<session>.jsonl` (`project_name`: every
+  UTF-16 unit but ASCII letters and digits a `-`, past 200 cut and hashed);
+  from the last 64 KiB, then the first (`WINDOW`: what Claude reads for its
+  own list, and Claude writes these lines again every 32 KiB): the latest
+  `custom-title` (the user's `/rename`; an empty one takes it back), else
+  the latest `ai-title`; the latest `last-prompt`; the file's mtime. pi's
+  are `<pi dir>/sessions/<project>/<timestamp>_<id>.jsonl`, the project
+  named by `pi_project_name` (one leading separator dropped, `/`, `\` and
+  `:` a `-`, between `--`), or every project in
+  `$PI_CODING_AGENT_SESSION_DIR` (a file's header `cwd` then says where it
+  ran); the first line is the header (`id`, `cwd`), the lines read the
+  latest `{"type":"session_info","name":…}` (the user's `/name`; pi
+  generates no title) and the last user `message` (a string or text blocks
+  joined), in the same `WINDOW` from the end, then the start. `read`,
+  `history`, `session_file` take the agent; `claude_session`,
+  `claude_history`, `claude_session_file` and `pi_session`, `pi_history`,
+  `pi_session_file` are the readers.
+  `ChatInfo::title`/`last_prompt` are those of the session the chat is in:
+  `DaemonState::chat_in_session` says which, from memory (its agent's hooks'
+  transcript, and its open run's session, its hooks' session, else the
+  chat's), and the file is found off the state lock
+  (`chat_session_file`, `sessions::session_file` for the chat's provider);
+  none for a new session nobody typed in. They are kept in the ledger's
+  memory
   (`Ledger::set_chat_session`, never written), read off the lock on start
   before the socket is bound, then every 10s (`CHAT_SESSION_INTERVAL`,
   `Daemon::chat_sessions_every` in tests), `ChatUpdated` when they change.
-  `ChatHistory { dir }` (a main checkout) replies `Sessions` (`SessionInfo`:
-  id, title, last prompt, `modified_at`), newest first, without the sessions
-  with neither title nor prompt and those a chat holds (its `session`, and
-  the one its agent is in). Context use reads a chat's transcript from
-  `chat_transcript`, never guesses it (several sessions share its
-  directory). Known limit: under the daemon's `HOME`/`CLAUDE_CONFIG_DIR`.
+  `ChatHistory { dir, provider }` (a main checkout; the configured agent's
+  sessions, Claude's when a client names none) replies `Sessions`
+  (`SessionInfo`: id, title, last prompt, `modified_at`), newest first,
+  without the sessions with neither title nor prompt and those a chat holds
+  (its `session`, and the one its agent is in). Context use reads a chat's
+  transcript from `chat_transcript` (the chat's provider's files), never
+  guesses it (several sessions share its directory). Known limit: under the
+  daemon's `HOME`/`CLAUDE_CONFIG_DIR`/`PI_CODING_AGENT_DIR`.
   The dashboard: see Chats in the dashboard.
   CLI (#66, `tam-cli/src/chat.rs`): `tam chat [REPO]` (`repos::resolve`,
   as `new -r`: from a worktree, its main checkout) is `CreateChat`, then
@@ -790,7 +863,8 @@ adopt). `tam-cli` depends on all three.
   the create closes the chat again (never ran, and it would hold
   `--session`). `tam close CHAT [-y]` (confirms on a terminal: refused,
   exit 1, without one and without `-y`; "n" keeps it; prints the `tam chat
-  REPO --session S` that makes it again), `tam rename CHAT [NAME]`, `tam
+  REPO --session S` that makes it again, with the agent to configure first
+  when the config names another one), `tam rename CHAT [NAME]`, `tam
   keep CHAT [--off]` take chats only (`GetChat` first: 3 not found, then 1
   refused); a task's name gets a hint. The commands that take a member
   take a chat through `ResolveTarget` (`Client::resolve_target`,
@@ -807,14 +881,15 @@ adopt). `tam-cli` depends on all three.
   `drop` and `merge` say a name is a chat's (`chat::not_a_task`; the
   others through `Ledger::resolve`, which says so for a chat's id or
   name). `tam history TASK/MEMBER` (or a member id) shows its task's.
-  Shown by `ChatInfo::label()` (name, else Claude's title, else id), named
-  by id in every hint (`chat::describe`, `tam attach c-…`): a title does
-  not resolve. `tam ps`: a chats table above the tasks (`ps::chat_lines`,
+  Shown by `ChatInfo::label()` (name, else its session's title, else id),
+  named by id in every hint (`chat::describe`, `tam attach c-…`): a title
+  does not resolve. `tam ps`: a chats table above the tasks (`ps::chat_lines`,
   an ID column, its own header), status the agent's else idle, LAST the
   last turn else creation, CLOSES `closes_at` as time left rounded up
   (`ps::closes`: `in 3d`, `due`, `kept`, `-` off); `ps --json` a new
   `chats` key (`schema::PsChat`: `id`, `name`, `label`, `title`,
-  `last_prompt`, `keep`, `closes_at`, …, then a member's agent keys).
+  `last_prompt`, `provider`, `keep`, `closes_at`, …, then a member's agent
+  keys).
   Documents for a chat (`schema::Subject`, flattened): `chat` where a
   task's have `task`, the chat the one entry of `members` (`name` null when
   unnamed, no `branch`); `close`/`rename`/`keep --json` print
@@ -928,7 +1003,9 @@ cargo test
 
 - Unit tests are inline in each module (~340 across all crates)
 - Integration tests in `crates/tam-daemon/tests/` (~60 async tests, real
-  sockets/PTYs/git repos; `merge.rs`: merge/split replies, events and what
+  sockets/PTYs/git repos; `pi.rs`: a fake `pi` started with the extension tam
+  writes, and the events that extension forwards driving a member's state,
+  session and run; `merge.rs`: merge/split replies, events and what
   fake Claude agents are told at their next prompt or tool call; `answer.rs`:
   a fake Claude's waiting permission hook answered, refused when stale,
   released when the request ends otherwise) and `crates/tam-cli/tests/` (`tam hook-notify`
@@ -960,8 +1037,13 @@ cargo test
   (one test, `CLAUDE_CONFIG_DIR` set, session files written by hand: the
   history, a chat made from a session of its repository only, its title
   read again as Claude rewrites it, gone while its agent runs a new
-  session, there at once after a restart); `sessions.rs` unit tests write
-  fixture lines by hand (never copied from real files).
+  session, there at once after a restart) and `chat_pi.rs` (one test,
+  `PI_CODING_AGENT_DIR` set and `CLAUDE_CONFIG_DIR` empty, pi's session
+  files written by hand: the history of one agent or the other, a chat made
+  from a pi session with its name and last prompt, pi resuming it by id,
+  closed and made again, neither agent taking the other's sessions);
+  `sessions.rs` unit tests write fixture lines by hand (never copied from
+  real files), window and all, for Claude and pi.
   The CLI's `chat_commands.rs` (one test, the real `tam` with a fake
   `claude` on its `PATH`, hooks played by the test, the process's
   HOME/XDG/`CLAUDE_CONFIG_DIR` temporary): `tam chat -d --json`, `ps` and

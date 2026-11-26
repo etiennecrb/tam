@@ -1,6 +1,6 @@
 # How tam runs Claude Code
 
-tam runs Claude Code: `claude` must be on your `PATH`. Nothing to set up.
+tam runs Claude Code: `claude` must be on your `PATH`. Nothing to set up. To run [pi](pi.md) instead, one line of config.
 
 ## Hooks
 

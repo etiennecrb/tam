@@ -212,7 +212,7 @@ async fn chats_from_the_command_line() {
     git(&api, &["init", "-q"]);
     git(&api, &["commit", "-q", "--allow-empty", "-m", "init"]);
     // Claude's file of a session run in the repository's main checkout.
-    let transcript = sessions::session_file(&root.join("claude"), &api, SESSION).unwrap();
+    let transcript = sessions::claude_session_file(&root.join("claude"), &api, SESSION).unwrap();
     std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
     std::fs::write(&transcript, "{}\n").unwrap();
     let worktree = root.join("w").join("api--feat");

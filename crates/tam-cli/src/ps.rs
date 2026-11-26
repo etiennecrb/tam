@@ -414,6 +414,7 @@ mod tests {
 
     fn chat(id: &str, name: Option<&str>, agents: &[AgentInfo]) -> Chat {
         let info = tam_proto::ChatInfo {
+            provider: "claude".into(),
             id: id.into(),
             name: name.map(str::to_string),
             repo: "api".into(),

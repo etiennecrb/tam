@@ -79,6 +79,7 @@ impl Conn {
 
     async fn history(&mut self, dir: &Path) -> Vec<SessionInfo> {
         let request = Request::ChatHistory {
+            provider: None,
             dir: dir.to_path_buf(),
         };
         match self.request(&request).await {
@@ -190,7 +191,7 @@ fn mode(session: &str) -> String {
 /// Append `lines` to the file of `session` run in `dir`, last written at
 /// `at` (Unix seconds).
 fn session(claude: &Path, dir: &Path, session: &str, lines: &[String], at: u64) {
-    let file = sessions::session_file(claude, dir, session).unwrap();
+    let file = sessions::claude_session_file(claude, dir, session).unwrap();
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     let mut f = File::options()
         .create(true)
@@ -290,6 +291,7 @@ async fn chats_take_titles_and_sessions_from_claudes_files() {
     // A repository's main checkout only.
     let message = conn
         .refused(&Request::ChatHistory {
+            provider: None,
             dir: root.join("nowhere"),
         })
         .await;
@@ -298,6 +300,7 @@ async fn chats_take_titles_and_sessions_from_claudes_files() {
     // Made from a session: its title at once, and as its label.
     let chat = conn
         .chat(&Request::CreateChat {
+            provider: None,
             dir: api.clone(),
             name: None,
             session: Some("s-held".into()),
@@ -318,6 +321,7 @@ async fn chats_take_titles_and_sessions_from_claudes_files() {
     for (dir, missing) in [(&api, "s-nope"), (&api, "s-web"), (&web, "s-old")] {
         let message = conn
             .refused(&Request::CreateChat {
+                provider: None,
                 dir: dir.to_path_buf(),
                 name: None,
                 session: Some(missing.into()),

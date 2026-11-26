@@ -332,6 +332,7 @@ async fn on_the_timer_once_at_the_prompt(dir: &Path) {
     // Kept while its agent starts: a second goes by fast.
     let chat = conn
         .chat(&Request::CreateChat {
+            provider: None,
             dir: api.clone(),
             name: Some("deploy".into()),
             session: None,
