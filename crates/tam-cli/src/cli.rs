@@ -276,7 +276,7 @@ pub enum Commands {
     },
 
     /// Wait for the agent's messages and print them (run in the background
-    /// by the inbox hooks tam injects into the Claude agents it spawns)
+    /// by the hooks and extensions tam gives the agents it spawns)
     #[command(hide = true)]
     InboxWait {
         /// Agent ID (defaults to $TAM_AGENT_ID; exits quietly if absent)
@@ -340,7 +340,7 @@ pub enum Commands {
     /// The text that ended the agent's last turn, in full, kept once the
     /// agent exits. There is none while a turn runs, before the first one
     /// ends, after a failed or interrupted turn, and for agents that report
-    /// none (only Claude reports them). Exit status: 0 printed, 1 no
+    /// none (Claude and pi report them). Exit status: 0 printed, 1 no
     /// response, 3 no such task or member, 5 daemon unreachable.
     Result {
         /// Task name (all its members), TASK/MEMBER, member id, or a chat's
@@ -384,8 +384,8 @@ pub enum Commands {
 
     /// Merge tasks: the members of each FROM task join task INTO, and the
     /// FROM tasks are gone. Worktrees, branches and running agents stay as
-    /// they are; Claude agents learn of their new task and peers at their
-    /// next prompt or tool call. Exit status: 0 merged, 1 refused, 3 no
+    /// they are; agents that have hooks learn of their new task and peers at
+    /// their next prompt or tool call. Exit status: 0 merged, 1 refused, 3 no
     /// such task, 5 daemon unreachable.
     Merge {
         /// The task that stays, with its name
@@ -417,8 +417,8 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Start a chat: a Claude session on a repository's main checkout, then
-    /// attach
+    /// Start a chat: an agent session (`[agent] program`: Claude Code, or
+    /// pi) on a repository's main checkout, then attach
     ///
     /// A chat owns nothing on disk (no worktree, no branch); several can run
     /// on one repository. The commands that take a task take a chat too
@@ -431,12 +431,12 @@ pub enum Commands {
         repo: Option<String>,
 
         /// Name the chat (unique among chats, and no task's name; default:
-        /// shown by its Claude title, else its id)
+        /// shown by its session's name, else its id)
         #[arg(short, long)]
         name: Option<String>,
 
-        /// Resume this existing Claude session of the repository instead of
-        /// starting a new one
+        /// Resume this existing session of the repository, of the configured
+        /// agent, instead of starting a new one
         #[arg(long, value_name = "ID")]
         session: Option<String>,
 

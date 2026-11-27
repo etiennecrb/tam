@@ -1219,6 +1219,7 @@ async fn shells_are_refused_where_they_cannot_run() {
     assert!(why.contains("not found"), "{why}");
     let chat = match conn
         .request(&Request::CreateChat {
+            provider: None,
             dir: api.clone(),
             name: Some("talk".into()),
             session: None,

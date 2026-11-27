@@ -265,7 +265,8 @@ impl Client {
 
     /// Start a member's agent in the chosen session, in our environment, through
     /// the configured wrapper (read now: a dashboard sees a change). Returns
-    /// the agent id and the session it resumed, if any.
+    /// the agent id and the session it resumed, if any. The agent is the
+    /// configured one (`[agent] program`).
     pub async fn run_agent(
         &mut self,
         member: &str,
@@ -273,17 +274,51 @@ impl Client {
         prompt: Option<String>,
         args: Vec<String>,
     ) -> Result<(String, Option<String>)> {
+        let config = crate::config::load_config().context("cannot read tam's config")?;
+        self.start_agent(&config.agent, config.wrapper, member, session, prompt, args)
+            .await
+    }
+
+    /// Start a chat's agent in the chosen session: the one it was made
+    /// with (`ChatInfo::provider`), whose files hold its title, history and
+    /// sessions (`tam-daemon/src/sessions.rs`).
+    pub async fn run_chat_agent(
+        &mut self,
+        chat: &ChatInfo,
+        session: SessionChoice,
+        prompt: Option<String>,
+        args: Vec<String>,
+    ) -> Result<(String, Option<String>)> {
+        let config = crate::config::load_config().context("cannot read tam's config")?;
+        self.start_agent(
+            &chat.provider,
+            config.wrapper,
+            &chat.id,
+            session,
+            prompt,
+            args,
+        )
+        .await
+    }
+
+    async fn start_agent(
+        &mut self,
+        provider: &str,
+        wrapper: Vec<String>,
+        member: &str,
+        session: SessionChoice,
+        prompt: Option<String>,
+        args: Vec<String>,
+    ) -> Result<(String, Option<String>)> {
         let request = Request::RunAgent {
             member: member.into(),
-            provider: None,
+            provider: Some(provider.into()),
             session,
             args,
             prompt,
             // The agent runs where we are, not where the daemon started.
             env: crate::repos::agent_env(),
-            wrapper: crate::config::load_config()
-                .context("cannot read tam's config")?
-                .wrapper,
+            wrapper,
         };
         match self.send(request).await? {
             Response::Running { id, resumed } => Ok((id, resumed)),
@@ -669,17 +704,21 @@ impl Client {
         })
     }
 
-    /// Make a chat on the repository whose main checkout is `dir`.
+    /// Make a chat on the repository whose main checkout is `dir`, run by
+    /// the configured agent (`[agent] program`): its session files are the
+    /// ones `session` names and `chat_history` lists.
     pub async fn create_chat(
         &mut self,
         dir: &Path,
         name: Option<&str>,
         session: Option<&str>,
     ) -> Result<ChatInfo> {
+        let config = crate::config::load_config().context("cannot read tam's config")?;
         let request = Request::CreateChat {
             dir: dir.to_path_buf(),
             name: name.map(str::to_string),
             session: session.map(str::to_string),
+            provider: Some(config.agent),
         };
         Ok(chat_reply("CreateChat", self.send(request).await?)?.0)
     }
@@ -702,12 +741,14 @@ impl Client {
         Ok(chat_reply("KeepChat", self.send(request).await?)?.0)
     }
 
-    /// The Claude sessions of the repository whose main checkout is `dir`
-    /// that a chat can be made from, newest first (those a chat holds left
-    /// out).
+    /// The sessions of the configured agent (`[agent] program`) on the
+    /// repository whose main checkout is `dir` that a chat can be made
+    /// from, newest first (those a chat holds left out).
     pub async fn chat_history(&mut self, dir: &Path) -> Result<Vec<SessionInfo>> {
+        let config = crate::config::load_config().context("cannot read tam's config")?;
         let request = Request::ChatHistory {
             dir: dir.to_path_buf(),
+            provider: Some(config.agent),
         };
         match self.send(request).await? {
             Response::Sessions { sessions } => Ok(sessions),

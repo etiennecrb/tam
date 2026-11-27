@@ -7,7 +7,7 @@
   <br>
   <strong>Terminal Agent Multiplexer</strong>
   <br>
-  Run Claude Code agents in parallel, each in its own git worktree, from one terminal dashboard.
+  Run Claude Code (or pi) agents in parallel, each in its own git worktree, from one terminal dashboard.
 </p>
 
 <p align="center">
@@ -28,7 +28,7 @@
 
 ---
 
-tam gives every piece of work you hand to an AI agent a name: a **task**. A task is a git branch, its worktree and a [Claude Code](https://github.com/anthropics/claude-code) session, created, resumed and cleaned up together. A small daemon keeps the agents running while you come and go, and a dashboard shows at a glance which ones need you.
+tam gives every piece of work you hand to an AI agent a name: a **task**. A task is a git branch, its worktree and a [Claude Code](https://github.com/anthropics/claude-code) (or [pi](https://pi.dev)) session, created, resumed and cleaned up together. A small daemon keeps the agents running while you come and go, and a dashboard shows at a glance which ones need you.
 
 <p align="center">
   <img src="assets/dashboard.png" alt="The tam dashboard: chats, shells and tasks grouped by repository, each with its status, and the selected agent's screen in the pane beside them">
@@ -40,18 +40,18 @@ Running several coding agents at once usually means juggling tmux panes, creatin
 
 - **One name per piece of work.** `tam new fix-auth` creates the branch, the worktree and the agent. `tam drop fix-auth` removes them, after checking that no work would be lost.
 - **Agents outlive your terminal.** Detach, close the terminal, come back from anywhere: the daemon keeps every agent running.
-- **Know who needs you.** Each agent's state (working, waiting for a prompt, blocked on a permission, asking a question, failed) comes live from Claude Code's own hooks, with optional desktop notifications.
+- **Know who needs you.** Each agent's state (working, waiting for a prompt, blocked on a permission, asking a question, failed) comes live from the agent itself — Claude Code's hooks, pi's events — with optional desktop notifications.
 - **Act without switching.** From the dashboard, watch any agent's screen, type into it, or answer a permission, a plan or a question.
 - **Span repositories.** One task can hold a worktree and an agent in each of several repositories. The agents know about each other and message each other.
 - **Script it.** Every command runs without a terminal, with `--json` output and meaningful exit statuses, so scripts and agents can drive tam too.
-- **Nothing to set up.** No hooks to install, no configuration required, no daemon to manage: it starts on first use and exits when idle.
+- **Nothing to set up.** No hooks to install, no configuration required, no daemon to manage: it starts on first use and exits when idle. (pi needs one line of config.)
 
 ## Install
 
 tam runs on **Linux** and **macOS**. It needs:
 
 - [git](https://git-scm.com/)
-- [Claude Code](https://github.com/anthropics/claude-code), installed and logged in: `claude` on your `PATH`
+- [Claude Code](https://github.com/anthropics/claude-code), installed and logged in: `claude` on your `PATH` — or [pi](https://pi.dev) (`pi` on your `PATH`, and `[agent] program = "pi"` in the config, see [docs/pi.md](docs/pi.md))
 
 Then install tam one of these ways:
 
@@ -116,9 +116,9 @@ The mouse works too: click to select, scroll the pane, drag over it to copy. The
 
 | | |
 |---|---|
-| **Task** | A named unit of work: a branch, its worktree and its Claude Code session. `tam new NAME` makes one, `tam drop NAME` cleans it up. |
+| **Task** | A named unit of work: a branch, its worktree and its agent session. `tam new NAME` makes one, `tam drop NAME` cleans it up. |
 | **Member** | One worktree of a task, with at most one agent. A task has one member per repository: `tam new feat -r api -r web` makes `feat/api` and `feat/web`. |
-| **Chat** | A Claude session on a repository's main checkout, with no branch or worktree of its own: for questions, debugging, a deployment. `tam chat`, or `c` in the dashboard. Closed after 3 days without use, unless kept. |
+| **Chat** | An agent session on a repository's main checkout, with no branch or worktree of its own: for questions, debugging, a deployment. `tam chat`, or `c` in the dashboard. Closed after 3 days without use, unless kept. |
 | **Shell** | Your `$SHELL`, kept running by the daemon in a worktree or a main checkout. `tam shell`, or `!` in the dashboard. |
 | **Daemon** | Owns the agents and shells. Starts with your first command and exits 30 seconds after the last agent, shell and client are gone. |
 
@@ -159,7 +159,7 @@ An idle agent wakes up to read it; a busy one reads it at its next step. Agents 
 ### Chats and shells
 
 ```bash
-tam chat              # a Claude session on this repository's main checkout
+tam chat              # an agent session on this repository's main checkout
 tam shell fix-auth    # a shell in the task's worktree, kept running by the daemon
 ```
 
@@ -175,7 +175,7 @@ tam wait fix-auth      # until the agent stops working
 tam result fix-auth    # its last response, in full
 ```
 
-One catch: Claude Code may ask whether to trust a new worktree, and a detached agent waits on that question (it shows as `ready`, with no result). Attach once to answer it.
+One catch: the agent may ask whether to trust a new worktree (Claude Code and pi both do), and a detached agent waits on that question (it shows as `ready`, with no result). Attach once to answer it.
 
 Exit statuses and every JSON document are described in [docs/scripting.md](docs/scripting.md).
 
@@ -236,12 +236,13 @@ NAME is a task, `TASK/MEMBER` for one member of a task, or a chat. Without it, `
 |---|---|
 | [Tasks](docs/tasks.md) | Creating, dropping, adopting, repairing, merging and splitting tasks |
 | [Dashboard](docs/dashboard.md) | Every key, the pane, answering requests, the mouse |
-| [Chats](docs/chats.md) | Claude sessions on a repository's main checkout |
+| [Chats](docs/chats.md) | Agent sessions on a repository's main checkout |
 | [Shells](docs/shells.md) | Shells the daemon keeps running |
 | [Agents working together](docs/collaboration.md) | Messages, peers, and the task's brief |
 | [Scripting](docs/scripting.md) | Running without a terminal, exit statuses, JSON output |
 | [Configuration](docs/configuration.md) | Every option, notifications, per-repository setup |
 | [How tam runs Claude Code](docs/claude-code.md) | Hooks, environment, dev-environment wrapper, sessions |
+| [pi](docs/pi.md) | Running pi instead of Claude Code: what tam adds, what differs |
 
 ## Contributing
 

@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tam_proto::{
-    AgentInfo, AgentState, Event, MemberHealth, MemberOutcome, MemberState, MessageInfo, NewMember,
-    Request, Response, SessionChoice, TaskInfo,
+    AgentInfo, AgentState, ChatInfo, Event, MemberHealth, MemberOutcome, MemberState, MessageInfo,
+    NewMember, Request, Response, SessionChoice, TaskInfo,
 };
 use tam_worktree::worktree;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -364,20 +364,18 @@ async fn state_monitor(state_arc: Arc<Mutex<DaemonState>>, notify_config: Option
             context_counter = 0;
 
             // Phase 1: collect metadata under lock (cheap). Several chats
-            // share a directory: a chat's transcript is known (its hooks',
-            // else its session's), never guessed (the newest one there may
-            // be another chat's).
+            // share a directory: a chat's session is known (its hooks', the
+            // run's, else the chat's), never guessed (the newest transcript
+            // there may be another chat's); its file is found below.
             let jobs: Vec<_> = state
                 .agents
                 .iter()
                 .map(|(id, agent)| {
-                    let mut job = agent.context_refresh_job(id);
-                    if state.ledger.is_chat(id) {
-                        job.transcript = state.chat_transcript(id);
-                    }
-                    job
+                    let job = agent.context_refresh_job(id);
+                    let in_session = state.chat_in_session(id);
+                    (job, in_session)
                 })
-                .filter(|job| job.transcript.is_some() || !state.ledger.is_chat(&job.id))
+                .filter(|(job, in_session)| in_session.is_some() || !state.ledger.is_chat(&job.id))
                 .collect();
 
             let event_tx = state.event_tx.clone();
@@ -387,11 +385,17 @@ async fn state_monitor(state_arc: Arc<Mutex<DaemonState>>, notify_config: Option
             // Phase 2: do file IO outside the lock
             let results: Vec<_> = jobs
                 .into_iter()
-                .filter_map(|job| {
+                .filter_map(|(job, in_session)| {
+                    let transcript = match &in_session {
+                        Some(in_session) => {
+                            DaemonState::chat_session_file(&job.provider, &job.dir, in_session)
+                        }
+                        None => job.transcript.clone(),
+                    };
                     let usage = provider::resolve(&job.provider).context_usage(
                         job.pid,
                         &job.dir,
-                        job.transcript.as_deref(),
+                        transcript.as_deref(),
                     );
                     usage.map(|u| (job.id, u.percent()))
                 })
@@ -1070,9 +1074,12 @@ async fn dispatch(request: Request, state: &Arc<Mutex<DaemonState>>) -> Response
             message: "wait_answer should be handled by connection handler".into(),
         },
         Request::Answer { agent, ask, answer } => handle_answer(state, &agent, &ask, answer).await,
-        Request::CreateChat { dir, name, session } => {
-            handle_create_chat(state, dir, name, session).await
-        }
+        Request::CreateChat {
+            dir,
+            name,
+            session,
+            provider,
+        } => handle_create_chat(state, provider, dir, name, session).await,
         Request::ListChats => Response::Chats {
             chats: state.lock().await.ledger.chats(),
         },
@@ -1098,7 +1105,7 @@ async fn dispatch(request: Request, state: &Arc<Mutex<DaemonState>>) -> Response
             handle_change_chat(state, &chat, |ledger, id| ledger.keep_chat(id, keep)).await
         }
         Request::CloseChat { chat } => handle_close_chat(state, &chat).await,
-        Request::ChatHistory { dir } => handle_chat_history(state, dir).await,
+        Request::ChatHistory { dir, provider } => handle_chat_history(state, provider, dir).await,
         Request::ResolveTarget { target, from } => {
             handle_resolve_target(state, &target, from.as_deref()).await
         }
@@ -1283,17 +1290,24 @@ async fn handle_run_agent(state: &Arc<Mutex<DaemonState>>, spec: RunSpec) -> Res
             };
         };
         let label = owner.label();
-        let chat = matches!(owner, Owner::Chat(_));
+        let chat = match &owner {
+            Owner::Chat(chat) => Some(chat.provider.clone()),
+            Owner::Member(..) => None,
+        };
         // Before looking for the session: it would not be resumed anyway.
         if state.agents.contains_key(&member) {
             return Response::Error {
                 message: format!("'{}' already has a running agent", label),
             };
         }
-        // Claude, whatever the member's earlier runs were.
-        let provider = provider.unwrap_or_else(|| "claude".into());
+        // The agent the client asks for, whatever the member's earlier runs
+        // were: a chat's own when it names none (its session, title and
+        // history are that agent's), Claude's otherwise.
+        let provider = provider
+            .or(chat.clone())
+            .unwrap_or_else(tam_proto::default_provider);
         let current = state.ledger.current_session(&member, &provider);
-        (label, chat, provider, current)
+        (label, chat.is_some(), provider, current)
     };
 
     let agent = provider::resolve(&provider);
@@ -3383,16 +3397,19 @@ impl DaemonState {
 
 async fn handle_create_chat(
     state: &Arc<Mutex<DaemonState>>,
+    provider: Option<String>,
     dir: PathBuf,
     name: Option<String>,
     session: Option<String>,
 ) -> Response {
-    // Git and Claude's files are read before the lock.
+    // Claude's or pi's files are read before the lock (as git runs).
+    let provider = provider.unwrap_or_else(tam_proto::default_provider);
+    let agent = provider.clone();
     let given = session.clone();
     let checked = run_git(move || {
         let dir = main_checkout(&dir)?;
         let said = match given {
-            Some(session) => claude_session_of(&dir, &session)?,
+            Some(session) => session_of(&agent, &dir, &session)?,
             None => None,
         };
         Ok((dir, said))
@@ -3409,7 +3426,7 @@ async fn handle_create_chat(
     let mut state = state.lock().await;
     match state
         .ledger
-        .create_chat(&dir, name.as_deref(), session.as_deref())
+        .create_chat(&dir, &provider, name.as_deref(), session.as_deref())
     {
         Ok(chat) => {
             let chat = match said {
@@ -3503,35 +3520,60 @@ async fn handle_close_chat(state: &Arc<Mutex<DaemonState>>, target: &str) -> Res
 }
 
 // ---------------------------------------------------------------------------
-// Chats' sessions in Claude's files (`crate::sessions`): each open chat's
-// title and last prompt, read again every 10s and kept in the ledger's
-// memory; a repository's history, for `CreateChat` to take a session from.
-// Read off the state lock.
+// Chats' sessions in their agent's files (`crate::sessions`): each open
+// chat's title and last prompt, read again every 10s and kept in the
+// ledger's memory; a repository's history, for `CreateChat` to take a
+// session from. The files are read off the state lock, whatever the agent.
 // ---------------------------------------------------------------------------
 
-/// How often the daemon reads again what Claude's files say of each open
+/// How often the daemon reads again what the agent's files say of each open
 /// chat's session (title, last prompt).
 pub const CHAT_SESSION_INTERVAL: Duration = Duration::from_secs(10);
 
+/// The session a chat's agent is in, from memory only: the transcript its
+/// hooks reported, and the session's id when it is known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChatInSession {
+    transcript: Option<PathBuf>,
+    session: Option<String>,
+}
+
 impl DaemonState {
-    /// The file of the Claude session chat `id` is in: the transcript its
-    /// agent's hooks reported, else (before its first hook) the session its
-    /// agent resumed, else (no agent) its current session's, in its
-    /// checkout's Claude project. `None`: no such chat, or a new session
-    /// nobody typed in yet.
-    fn chat_transcript(&self, id: &str) -> Option<PathBuf> {
+    /// The session chat `id` is in: the transcript its agent's hooks
+    /// reported, and the session itself (its open run's, its hooks', else the
+    /// one the chat records). `None`: no such chat, or nothing typed in it
+    /// yet.
+    fn chat_in_session(&self, id: &str) -> Option<ChatInSession> {
         let chat = self.ledger.chat(id)?;
-        let session = match self.agents.get(id) {
-            Some(agent) => {
-                if let Some(path) = agent.context_refresh_job(id).transcript {
-                    return Some(path);
-                }
-                let run = self.ledger.runs_of(id).pop();
-                run.filter(|r| r.ended_at.is_none())?.session_id?
-            }
-            None => chat.session?,
+        let in_session = match self.agents.get(id) {
+            Some(agent) => ChatInSession {
+                transcript: agent.transcript().map(Path::to_path_buf),
+                session: self
+                    .ledger
+                    .open_run_session(id)
+                    .map(str::to_string)
+                    .or_else(|| agent.session_id().map(str::to_string)),
+            },
+            None => ChatInSession {
+                transcript: None,
+                session: chat.session.clone(),
+            },
         };
-        sessions::session_file(&sessions::claude_dir()?, &chat.dir, &session)
+        (in_session.transcript.is_some() || in_session.session.is_some()).then_some(in_session)
+    }
+
+    /// The file of the session an agent is in, when it is there: the
+    /// transcript its hooks reported, else the agent's file of that session.
+    /// Reads the agents' directories, so: off the lock.
+    fn chat_session_file(
+        provider: &str,
+        dir: &Path,
+        in_session: &ChatInSession,
+    ) -> Option<PathBuf> {
+        if let Some(transcript) = &in_session.transcript {
+            return transcript.is_file().then(|| transcript.clone());
+        }
+        sessions::session_file(provider, dir, in_session.session.as_deref()?)
     }
 }
 
@@ -3545,20 +3587,20 @@ fn main_checkout(dir: &Path) -> Result<PathBuf> {
     Ok(worktree::resolve_path(dir))
 }
 
-/// What Claude's files say of `session`, a session run in `dir`; an error
-/// when they hold no such session. Not looked for (`None`) when Claude's
-/// directory is unknown; an empty id is the ledger's to refuse.
-fn claude_session_of(dir: &Path, session: &str) -> Result<Option<ChatSession>> {
-    let Some(claude) = sessions::claude_dir().filter(|_| !session.trim().is_empty()) else {
+/// What the files of `agent` say of `session`, a session run in `dir`; an
+/// error when they hold no such session. `None` for an empty id: the
+/// ledger refuses it.
+fn session_of(agent: &str, dir: &Path, session: &str) -> Result<Option<ChatSession>> {
+    if session.trim().is_empty() {
         return Ok(None);
-    };
-    match sessions::session_file(&claude, dir, session).filter(|f| f.is_file()) {
-        Some(file) => Ok(Some(chat_session(sessions::read(&file)))),
+    }
+    match sessions::session_file(agent, dir, session) {
+        Some(file) => Ok(Some(chat_session(sessions::read(agent, &file)))),
         None => anyhow::bail!(
-            "Claude has no session {} run in {} (looked in {})",
+            "{} has no session {} run in {}",
+            agent,
             session,
-            dir.display(),
-            sessions::project_dir(&claude, dir).display()
+            dir.display()
         ),
     }
 }
@@ -3589,29 +3631,38 @@ async fn chat_session_loop(state: Weak<Mutex<DaemonState>>, every: Duration) {
     }
 }
 
-/// Read again what Claude's files say of each open chat's session, and
+/// Read again what the agents' files say of each open chat's session, and
 /// push `ChatUpdated` for each chat where it changed.
 async fn refresh_chat_sessions(state: &Arc<Mutex<DaemonState>>) {
-    let files: Vec<(String, Option<PathBuf>)> = {
+    // What to read comes from memory, under the lock; the files are found
+    // and read without it.
+    let chats: Vec<(ChatInfo, Option<ChatInSession>)> = {
         let state = state.lock().await;
-        let chats = state.ledger.chats();
-        chats
+        state
+            .ledger
+            .chats()
             .into_iter()
             .map(|chat| {
-                let file = state.chat_transcript(&chat.id);
-                (chat.id, file)
+                let in_session = state.chat_in_session(&chat.id);
+                (chat, in_session)
             })
             .collect()
     };
-    if files.is_empty() {
+    if chats.is_empty() {
         return;
     }
     let read = tokio::task::spawn_blocking(move || {
-        files
+        chats
             .into_iter()
-            .map(|(id, file)| {
-                let said = chat_session(file.as_deref().and_then(sessions::read));
-                (id, file, said)
+            .map(|(chat, in_session)| {
+                let file = in_session.as_ref().and_then(|in_session| {
+                    DaemonState::chat_session_file(&chat.provider, &chat.dir, in_session)
+                });
+                let said = chat_session(
+                    file.as_deref()
+                        .and_then(|file| sessions::read(&chat.provider, file)),
+                );
+                (chat, in_session, said)
             })
             .collect::<Vec<_>>()
     })
@@ -3620,20 +3671,25 @@ async fn refresh_chat_sessions(state: &Arc<Mutex<DaemonState>>) {
         return;
     };
     let mut state = state.lock().await;
-    for (id, file, said) in read {
+    for (chat, in_session, said) in read {
         // Its agent went to another session meanwhile: the next pass reads it.
-        if state.chat_transcript(&id) != file {
+        if state.chat_in_session(&chat.id) != in_session {
             continue;
         }
-        if let Some(chat) = state.ledger.set_chat_session(&id, said) {
+        if let Some(chat) = state.ledger.set_chat_session(&chat.id, said) {
             state.broadcast(Event::ChatUpdated { chat });
         }
     }
 }
 
-/// The Claude sessions of the repository whose main checkout is `dir`,
+/// The sessions of `agent` on the repository whose main checkout is `dir`,
 /// newest first, but those an open chat holds.
-async fn handle_chat_history(state: &Arc<Mutex<DaemonState>>, dir: PathBuf) -> Response {
+async fn handle_chat_history(
+    state: &Arc<Mutex<DaemonState>>,
+    provider: Option<String>,
+    dir: PathBuf,
+) -> Response {
+    let provider = provider.unwrap_or_else(tam_proto::default_provider);
     let dir = match run_git(move || main_checkout(&dir)).await {
         Ok(dir) => dir,
         Err(e) => {
@@ -3641,11 +3697,6 @@ async fn handle_chat_history(state: &Arc<Mutex<DaemonState>>, dir: PathBuf) -> R
                 message: format!("{e:#}"),
             }
         }
-    };
-    let Some(claude) = sessions::claude_dir() else {
-        return Response::Sessions {
-            sessions: Vec::new(),
-        };
     };
     // A chat holds its current session, and the one its agent is in (a
     // new session, before its first turn is recorded).
@@ -3656,13 +3707,13 @@ async fn handle_chat_history(state: &Arc<Mutex<DaemonState>>, dir: PathBuf) -> R
             .into_iter()
             .flat_map(|chat| {
                 let running = state
-                    .chat_transcript(&chat.id)
-                    .and_then(|f| Some(f.file_stem()?.to_string_lossy().into_owned()));
+                    .chat_in_session(&chat.id)
+                    .and_then(|in_session| in_session.session);
                 chat.session.into_iter().chain(running)
             })
             .collect()
     };
-    let history = tokio::task::spawn_blocking(move || sessions::history(&claude, &dir))
+    let history = tokio::task::spawn_blocking(move || sessions::history(&provider, &dir))
         .await
         .unwrap_or_default();
     Response::Sessions {

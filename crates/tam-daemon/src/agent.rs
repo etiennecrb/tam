@@ -154,6 +154,11 @@ impl Agent {
         Some(result)
     }
 
+    /// The transcript the agent's hooks reported, if they reported one.
+    pub fn transcript(&self) -> Option<&Path> {
+        self.hook_data.transcript_path.as_deref()
+    }
+
     /// Session id reported by the agent's hooks.
     pub fn session_id(&self) -> Option<&str> {
         self.hook_data.detail.session_id.as_deref()

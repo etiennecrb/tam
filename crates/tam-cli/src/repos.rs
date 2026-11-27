@@ -91,10 +91,10 @@ pub fn agent_env() -> tam_proto::AgentEnv {
     tam_proto::AgentEnv(for_agent(git_env()))
 }
 
-/// Variables of the caller that are not the agent's. Claude's are those a
-/// Claude session sets for the commands it runs (an agent starting another
-/// one); its own settings (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_USE_BEDROCK`,
-/// …) pass.
+/// Variables of the caller that are not the agent's. Claude's and pi's are
+/// those their sessions set for the commands they run (an agent starting
+/// another one); their own settings (`CLAUDE_CONFIG_DIR`,
+/// `CLAUDE_CODE_USE_BEDROCK`, `PI_CODING_AGENT_DIR`, …) pass.
 const NOT_FOR_AGENTS: &[&str] = &[
     // The calling agent's: the daemon sets the new agent's own.
     "TAM_AGENT_ID",
@@ -115,6 +115,13 @@ const NOT_FOR_AGENTS: &[&str] = &[
     "CLAUDE_EFFORT",
     "CLAUDE_PROJECT_DIR",
     "CLAUDE_ENV_FILE",
+    // A calling pi session's: the new agent reports its own session to its
+    // tools, not the one this one is in.
+    "PI_SESSION_ID",
+    "PI_SESSION_FILE",
+    "PI_PROVIDER",
+    "PI_MODEL",
+    "PI_REASONING_LEVEL",
     // The caller's own pane or window: the agent's tools would act on it
     // (e.g. Claude opens teammates in tmux panes when `$TMUX` is set).
     "TMUX",
@@ -312,12 +319,18 @@ mod tests {
             ("TERM", "xterm-kitty"),
             ("CLAUDE_CONFIG_DIR", "/home/u/.claude-work"),
             ("CLAUDE_CODE_USE_BEDROCK", "1"),
-            // Ours as an agent, or as a Claude session's command.
+            ("PI_CODING_AGENT_DIR", "/home/u/.pi/agent"),
+            // Ours as an agent, or as a Claude or pi session's command.
             ("TAM_AGENT_ID", "m-caller"),
             ("TAM_SOCKET", "/run/tam/sock"),
             ("CLAUDECODE", "1"),
             ("CLAUDE_CODE_SESSION_ID", "abc"),
             ("CLAUDE_CODE_MESSAGING_TOKEN", "secret"),
+            ("PI_SESSION_ID", "s-caller"),
+            (
+                "PI_SESSION_FILE",
+                "/home/u/.pi/agent/sessions/x/s-caller.jsonl",
+            ),
             ("TMUX", "/tmp/tmux-1000/default,1,0"),
             ("COLUMNS", "200"),
             ("PWD", "/home/u"),
@@ -335,6 +348,7 @@ mod tests {
                 "CLAUDE_CONFIG_DIR",
                 "DIRENV_DIFF",
                 "PATH",
+                "PI_CODING_AGENT_DIR",
                 "SSH_AUTH_SOCK",
                 "TERM"
             ]

@@ -326,6 +326,11 @@ pub struct ChatInfo {
     pub repo: String,
     /// The repository's main checkout, where its agent runs.
     pub dir: PathBuf,
+    /// The agent it runs, as `[agent] program` said when it was made:
+    /// `claude` (also for chats made before pi) or `pi`. Its session's
+    /// title, last prompt and history come from that agent's files.
+    #[serde(default = "default_provider")]
+    pub provider: String,
     /// Unix timestamp (seconds) of its creation; chats are listed in
     /// creation order.
     pub created_at: u64,
@@ -373,14 +378,14 @@ impl ChatInfo {
     }
 }
 
-/// A Claude session of a repository's main checkout, from Claude's own
-/// files (`ChatHistory`): one a chat can be made from.
+/// A session of a repository's main checkout, from its agent's own files
+/// (`ChatHistory`): one a chat can be made from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionInfo {
-    /// Claude's session id (`CreateChat::session`).
+    /// The agent's session id (`CreateChat::session`).
     pub id: String,
-    /// The name the user gave it in Claude (`/rename`), else the title
-    /// Claude generated.
+    /// The name the user gave it (`/rename` in Claude or pi), else the
+    /// title Claude generated (pi generates none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// The latest prompt typed in it (one line, 200 characters at most).
@@ -666,8 +671,9 @@ pub enum Request {
     RunAgent {
         /// A member id, or a chat id.
         member: String,
-        /// Unset: Claude. A program to run in its place: for tam's tests,
-        /// no client sets it.
+        /// The agent to start: `claude` or `pi` (a program, for tam's
+        /// tests). `None`: a chat's own provider (`ChatInfo::provider`),
+        /// else the default one (`default_provider`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
         #[serde(default)]
@@ -898,13 +904,19 @@ pub enum Request {
         /// Unique among chats; `None`: unnamed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
-        /// An existing Claude session of that repository for its agent to
-        /// resume, instead of a new one (`ChatHistory` lists them). Refused
-        /// when Claude's files have no such session run in `dir`, and when
-        /// a chat holds it as its session already. Checked again when the
-        /// agent starts (Claude deletes old sessions).
+        /// An existing session of that repository, of the chat's agent, for
+        /// it to resume instead of a new one (`ChatHistory` lists them).
+        /// Refused when that agent's files have no such session run in
+        /// `dir`, and when a chat holds it as its session already. Checked
+        /// again when the agent starts (both agents delete old sessions).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// The agent to run: `claude` (the default, and what a client that
+        /// names none gets) or `pi`. Its sessions are the ones `session`
+        /// and `ChatHistory` mean, and where the title and last prompt
+        /// come from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
     },
     /// All chats, in creation order. Replies `Chats`.
     ListChats,
@@ -937,12 +949,16 @@ pub enum Request {
     },
     /// The Claude sessions of the repository whose main checkout is `dir`,
     /// newest first, but those an open chat holds (its `session`): what
-    /// `CreateChat` can make a chat from. Read from Claude's files; a
+    /// `CreateChat` can make a chat from. Read from that agent's files; a
     /// session with neither title nor prompt is left out. Replies
     /// `Sessions`.
     ChatHistory {
         /// A repository's main checkout (not a linked worktree).
         dir: PathBuf,
+        /// The agent whose sessions to list (`claude` when a client names
+        /// none): the one the chat would run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
     },
     /// Find the task member or chat a user named, as `SendMessage` finds
     /// its recipient: what `ResolveMember` takes, then a chat's id, then a
@@ -1239,7 +1255,7 @@ pub enum Response {
         /// before, by member id.
         previous: BTreeMap<String, String>,
         /// Members whose running agents are told at their next prompt or
-        /// tool call (Claude agents, through their hooks).
+        /// tool call (agents with hooks: Claude and pi).
         #[serde(default)]
         notified: Vec<String>,
     },
@@ -1351,6 +1367,12 @@ pub enum Event {
 pub enum ServerMessage {
     Response(Response),
     Event(Event),
+}
+
+/// The agent a chat runs when nothing said otherwise: Claude Code's, for
+/// chats made before tam ran pi.
+pub fn default_provider() -> String {
+    "claude".to_string()
 }
 
 /// Default socket path for daemon communication.
@@ -2653,6 +2675,7 @@ mod tests {
             name: None,
             repo: "api".into(),
             dir: PathBuf::from("/src/api"),
+            provider: "claude".into(),
             created_at: 100,
             keep: false,
             session: None,
@@ -2669,7 +2692,7 @@ mod tests {
         let chat = sample_chat();
         assert_eq!(
             serde_json::to_string(&chat).unwrap(),
-            r#"{"id":"c-0000abcd","repo":"api","dir":"/src/api","created_at":100,"run_count":0}"#
+            r#"{"id":"c-0000abcd","repo":"api","dir":"/src/api","provider":"claude","created_at":100,"run_count":0}"#
         );
         assert_eq!(chat.label(), "c-0000abcd");
         let named = ChatInfo {
@@ -2714,6 +2737,7 @@ mod tests {
     #[test]
     fn chat_history_wire_format() {
         let json = serde_json::to_string(&Request::ChatHistory {
+            provider: None,
             dir: PathBuf::from("/src/api"),
         })
         .unwrap();
@@ -2751,6 +2775,7 @@ mod tests {
     #[test]
     fn chat_requests_wire_format() {
         let json = serde_json::to_string(&Request::CreateChat {
+            provider: None,
             dir: PathBuf::from("/src/api"),
             name: None,
             session: Some("s-1".into()),

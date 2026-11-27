@@ -151,6 +151,7 @@ fn repo(root: &Path, name: &str) -> PathBuf {
 
 fn create(dir: &Path, name: Option<&str>) -> Request {
     Request::CreateChat {
+        provider: None,
         dir: dir.to_path_buf(),
         name: name.map(str::to_string),
         session: None,

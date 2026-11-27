@@ -86,7 +86,7 @@ enum Action {
         label: String,
         keep: bool,
     },
-    /// Name a chat (`None`: Claude's title again).
+    /// Name a chat (`None`: its session's title again).
     RenameChat {
         id: String,
         label: String,
@@ -1798,13 +1798,15 @@ async fn attach(
     // The dashboard reads nothing while attached.
     unwatch_screen(client, app).await;
     input.pause().await;
-    // An agent just started may not be in the list yet: it is Claude. A
-    // shell has none.
+    // An agent just started may not be in the list yet: its chat's agent,
+    // else the default. A shell has none.
     let provider = match app.shells.iter().any(|s| s.id == id) {
         true => String::new(),
         false => app
             .find_agent(id)
-            .map_or_else(|| "claude".to_string(), |a| a.provider.clone()),
+            .map(|agent| agent.provider.clone())
+            .or_else(|| app.find_chat(id).map(|chat| chat.info.provider.clone()))
+            .unwrap_or_else(tam_proto::default_provider),
     };
     let attached = attach_agent(terminal, app, id, label, &provider).await;
     mouse_capture(true);
@@ -1821,8 +1823,12 @@ async fn attach(
 /// notice says why (with the way out when its session is gone), and the
 /// pane gives the keyboard back.
 async fn resume_chat(client: &mut Client, app: &mut App, id: &str, label: &str) -> bool {
+    // Its own agent (`ChatInfo::provider`): the one it was made with.
+    let Some(chat) = app.find_chat(id).map(|chat| chat.info.clone()) else {
+        return false;
+    };
     match client
-        .run_agent(id, SessionChoice::Current, None, vec![])
+        .run_chat_agent(&chat, SessionChoice::Current, None, vec![])
         .await
     {
         Ok((_, Some(_))) => {
@@ -1886,7 +1892,7 @@ async fn create_chat(client: &mut Client, app: &mut App, dir: &Path, session: Op
         Err(e) => return failed(app, e),
     };
     let id = chat.id.clone();
-    app.upsert_chat(chat);
+    app.upsert_chat(chat.clone());
     let pick = Pick::Chat(id.clone());
     if !app.visible_entries().iter().any(|e| e.pick() == pick) {
         app.filter.clear();
@@ -1894,7 +1900,7 @@ async fn create_chat(client: &mut Client, app: &mut App, dir: &Path, session: Op
     }
     app.select(&pick);
     match client
-        .run_agent(&id, SessionChoice::Current, None, vec![])
+        .run_chat_agent(&chat, SessionChoice::Current, None, vec![])
         .await
     {
         Ok(_) => {
@@ -3201,6 +3207,7 @@ mod tests {
 
     fn chat_info(id: &str, title: &str) -> tam_proto::ChatInfo {
         tam_proto::ChatInfo {
+            provider: "claude".into(),
             id: id.into(),
             name: None,
             repo: "api".into(),
@@ -3442,7 +3449,7 @@ mod tests {
             Action::KeepChat { keep: false, .. }
         ));
 
-        // Name it; empty, Claude's title again.
+        // Name it; empty, its session's title again.
         handle_key_event(press('N'), &mut app, &config);
         let Mode::RenameChat { name, title, .. } = &app.mode else {
             panic!("no rename");

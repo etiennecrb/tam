@@ -118,6 +118,7 @@ async fn a_chats_agent_uses_tam_as_any_shell() {
     let chat = match send(
         &mut stream,
         &Request::CreateChat {
+            provider: None,
             dir: api.clone(),
             name: Some("debug".into()),
             session: None,

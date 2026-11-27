@@ -10,6 +10,9 @@ Every key is optional. An example with all of them:
 [spawn]
 wrapper = ["direnv", "exec", "."]   # run every agent through it, in its worktree (see claude-code.md)
 
+[agent]
+program = "claude"            # the agent tam new, tam run and the dashboard start: claude (default) or pi (see pi.md)
+
 [worktree]
 root = "~/worktrees"          # where worktrees are created (default)
 auto_init = true              # run .tam.toml after worktree creation (default: false)
@@ -43,6 +46,10 @@ reference = "https://tickets.example.com/SHOP-{1}"
 prompt = "/start-ticket {brief}"        # the agents' start prompt for tam new without -p
 ```
 
+### The agent
+
+`program` in `[agent]` is the agent `tam new`, `tam run`, `tam chat` and the dashboard start: `claude` (the default, see [How tam runs Claude Code](claude-code.md)) or `pi` (see [pi](pi.md)). A chat keeps the agent it was made with; new ones follow this. `tam run`, `tam chat` and the dashboard read it at each start; a change needs no restart.
+
 ### Custom commands
 
 A custom command's key is a single character the dashboard does not use: a config binding one of its keys does not load. `c`, `p`, `N`, `v`, `!` and `x` are the exception, being newer than custom commands: a command bound to one of them keeps it, and the dashboard's action (new chat, keep, rename a chat, scroll the pane, a shell here, stop or close a shell) then has no key (the help says so; `d` still closes a shell). On a shell in a worktree, a custom command gets its member's `{task}`, `{id}` and `{dir}`; on a shell on a main checkout, `{task}` is its name (`Shell #1`) and `{id}` its id.
@@ -61,7 +68,7 @@ The notify command runs with `sh -c` on state changes, except while you are atta
 
 | Placeholder | Value |
 |---|---|
-| `{task}`, `{id}` | Task name, agent id (the member id); for a chat, its name (else the title of its Claude session, else its id) and its id |
+| `{task}`, `{id}` | Task name, agent id (the member id); for a chat, its name (else the name of its session, else its id) and its id |
 | `{state}` (alias `{status}`), `{old_state}` | New and previous agent state |
 | `{kind}` | `question`, `permission`, `done` or `error` |
 | `{message}` | The question or permission asked, the agent's last response, or the error |

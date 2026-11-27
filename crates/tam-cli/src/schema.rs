@@ -474,7 +474,7 @@ pub struct MovedMember {
     /// The agent (provider) running for the member: it keeps running.
     pub agent: Option<String>,
     /// Whether its agent is told of the change at its next prompt or tool
-    /// call (Claude agents).
+    /// call (agents with hooks).
     pub notified: bool,
 }
 
@@ -489,14 +489,17 @@ pub struct PsChat {
     /// How tam shows it (its name, else `title`, else its id): not always
     /// a name tam takes back.
     pub label: String,
-    /// The title of its Claude session (the user's `/rename`, else
-    /// Claude's), from Claude's files.
+    /// The name of its session (the user's `/rename` in Claude or pi, else
+    /// the title Claude generated; `null` when it has none), from the
+    /// files of its agent.
     pub title: Option<String>,
-    /// The latest prompt in its Claude session, from Claude's files.
+    /// The latest prompt in its session, from the files of its agent.
     pub last_prompt: Option<String>,
     pub repo: String,
     /// The repository's main checkout, where its agent runs.
     pub dir: PathBuf,
+    /// The agent it runs: `claude`, or `pi`.
+    pub provider: String,
     /// `run`, `ready`, `block`, `question`, `error` or `idle`.
     pub status: String,
     /// Kept: never closed for want of turns.
@@ -538,6 +541,7 @@ impl PsChat {
             last_prompt: info.last_prompt.clone(),
             repo: info.repo.clone(),
             dir: info.dir.clone(),
+            provider: info.provider.clone(),
             status: chat.status().to_string(),
             keep: info.keep,
             closes_at: info.closes_at,

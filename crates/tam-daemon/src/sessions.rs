@@ -24,8 +24,17 @@
 //! from the last 64 KiB, then the first 64 KiB. So does this module
 //! ([`WINDOW`]).
 //!
+//! pi's are read too, for its chats: `<pi dir>/sessions/<project>/<timestamp>_<id>.jsonl`,
+//! `<project>` the directory it ran in with `/`, `\` and `:` made `-` between
+//! `--` ([`pi_project_name`]), or one directory for every project when
+//! `$PI_CODING_AGENT_SESSION_DIR` is set. Its first line is the header (`id`,
+//! `cwd`); the lines read here are `{"type":"session_info","name":…}` (the
+//! name the user gave the session; pi generates no title) and its messages,
+//! the last `{"type":"message","message":{"role":"user",…}}` being the latest
+//! prompt. pi appends like Claude, so the same window is read.
+//!
 //! Known limit, as for transcripts elsewhere in the daemon: the files are
-//! looked for under the daemon's own `HOME`/`CLAUDE_CONFIG_DIR`.
+//! looked for under the daemon's own `HOME`/`CLAUDE_CONFIG_DIR`/`PI_CODING_AGENT_DIR`.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -103,34 +112,23 @@ fn base36(mut n: u64) -> String {
 
 /// The file of session `session` run in `dir`, whether it exists or not.
 /// `None` for what cannot be a session id (empty, a path).
-pub fn session_file(claude_dir: &Path, dir: &Path, session: &str) -> Option<PathBuf> {
-    if session.is_empty() || session.contains(['/', '\\']) || session.starts_with('.') {
+pub fn claude_session_file(claude_dir: &Path, dir: &Path, session: &str) -> Option<PathBuf> {
+    if !valid_session(session) {
         return None;
     }
     Some(project_dir(claude_dir, dir).join(format!("{session}.jsonl")))
 }
 
-/// What a session's file says of it: its title (the user's name for it,
-/// else Claude's), its latest prompt, and when it was last written.
+/// What Claude's file of a session says of it: its title (the user's name
+/// for it, else Claude's), its latest prompt, and when it was last written.
 /// `None` when it cannot be read.
-pub fn read(file: &Path) -> Option<SessionInfo> {
+pub fn claude_session(file: &Path) -> Option<SessionInfo> {
     let id = file
         .file_name()?
         .to_str()?
         .strip_suffix(".jsonl")
         .filter(|id| !id.is_empty() && !id.starts_with('.'))?;
-    let mut f = File::open(file).ok()?;
-    let meta = f.metadata().ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    let modified_at = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_secs());
-
-    let len = meta.len();
+    let (mut f, len, modified_at) = open_session(file)?;
     let start = len.saturating_sub(WINDOW);
     let mut found = Found::default();
     found.scan(&read_at(&mut f, start, len - start)?, start > 0, id);
@@ -149,26 +147,416 @@ pub fn read(file: &Path) -> Option<SessionInfo> {
     })
 }
 
-/// The sessions of `dir` (a repository's main checkout) that have a title
-/// or a prompt, newest first. A session nobody typed in says nothing worth
-/// listing (a new chat's, before its first turn).
-pub fn history(claude_dir: &Path, dir: &Path) -> Vec<SessionInfo> {
-    let Ok(entries) = std::fs::read_dir(project_dir(claude_dir, dir)) else {
+/// Claude's sessions of `dir` (a repository's main checkout), newest first.
+pub fn claude_history(claude_dir: &Path, dir: &Path) -> Vec<SessionInfo> {
+    newest_first(
+        jsonl_files(&project_dir(claude_dir, dir))
+            .iter()
+            .filter_map(|file| claude_session(file))
+            .collect(),
+    )
+}
+
+/// The session files under `dir`, in no order.
+fn jsonl_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut sessions: Vec<SessionInfo> = entries
+    entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|ext| ext == "jsonl"))
-        .filter_map(|p| read(&p))
-        .filter(|s| s.title.is_some() || s.last_prompt.is_some())
-        .collect();
+        .collect()
+}
+
+/// The sessions to list, newest first. A session nobody typed in says
+/// nothing worth listing (a new chat's, before its first turn).
+fn newest_first(mut sessions: Vec<SessionInfo>) -> Vec<SessionInfo> {
+    sessions.retain(|session| session.title.is_some() || session.last_prompt.is_some());
     sessions.sort_by(|a, b| {
         b.modified_at
             .cmp(&a.modified_at)
             .then_with(|| a.id.cmp(&b.id))
     });
     sessions
+}
+
+/// A session's file, open, with its length and when it was last written
+/// (Unix seconds). `None` when it cannot be read.
+fn open_session(file: &Path) -> Option<(File, u64, u64)> {
+    let f = File::open(file).ok()?;
+    let meta = f.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let modified_at = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
+    Some((f, meta.len(), modified_at))
+}
+
+// --- pi ---
+
+/// pi's data directory: `$PI_CODING_AGENT_DIR`, else `~/.pi/agent`.
+pub fn pi_dir() -> Option<PathBuf> {
+    match std::env::var_os("PI_CODING_AGENT_DIR").filter(|dir| !dir.is_empty()) {
+        Some(dir) => Some(PathBuf::from(dir)),
+        None => Some(
+            PathBuf::from(std::env::var_os("HOME")?)
+                .join(".pi")
+                .join("agent"),
+        ),
+    }
+}
+
+/// `$PI_CODING_AGENT_SESSION_DIR`: one directory for every project, when set.
+fn pi_session_dir() -> Option<PathBuf> {
+    std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+}
+
+/// How pi names the directory of the sessions run in `dir`: one leading
+/// separator dropped, `/`, `\` and `:` made `-`, between `--`
+/// (`--Users-me-app--`).
+pub fn pi_project_name(dir: &Path) -> String {
+    let path = dir.to_string_lossy();
+    let stripped = path.strip_prefix(['/', '\\']).unwrap_or(path.as_ref());
+    let name: String = stripped
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' => '-',
+            c => c,
+        })
+        .collect();
+    format!("--{name}--")
+}
+
+/// The directory holding pi's sessions of `dir`: its project's, or the one
+/// `$PI_CODING_AGENT_SESSION_DIR` names (every project in it, a file's
+/// header saying where it ran).
+fn pi_project_dir(dir: &Path) -> Option<PathBuf> {
+    match pi_session_dir() {
+        Some(flat) => Some(flat),
+        None => Some(pi_dir()?.join("sessions").join(pi_project_name(dir))),
+    }
+}
+
+/// The header of pi's session file (its first line): the session's id and
+/// the directory it runs in.
+fn pi_header(bytes: &[u8]) -> Option<(String, Option<PathBuf>)> {
+    #[derive(Deserialize)]
+    struct Header {
+        #[serde(rename = "type")]
+        kind: String,
+        id: Option<String>,
+        cwd: Option<String>,
+    }
+    let line = bytes.split(|&b| b == b'\n').next()?;
+    let header: Header = serde_json::from_slice(line).ok()?;
+    if header.kind != "session" {
+        return None;
+    }
+    Some((header.id?, header.cwd.map(PathBuf::from)))
+}
+
+/// How much of pi's file its header (one line) is read from.
+const HEAD: u64 = 4 * 1024;
+
+/// The header of the session in `file`.
+fn pi_header_of(file: &Path) -> Option<(String, Option<PathBuf>)> {
+    let mut f = File::open(file).ok()?;
+    pi_header(&read_at(&mut f, 0, HEAD)?)
+}
+
+/// Whether pi ran the session in `file` in `dir`. `own`: the file is in
+/// `dir`'s own project directory (not the one every project is in), where
+/// every session ran in it.
+fn pi_ran_in(file: &Path, dir: &Path, own: bool) -> bool {
+    own || pi_header_of(file)
+        .and_then(|(_, cwd)| cwd)
+        .is_some_and(|cwd| tam_worktree::worktree::same_path(&cwd, dir))
+}
+
+/// Whether `project` is the directory pi keeps the sessions run in `dir` in.
+fn pi_owns(project: &Path, dir: &Path) -> bool {
+    project
+        .file_name()
+        .is_some_and(|name| name == pi_project_name(dir).as_str())
+}
+
+/// What pi's file of a session says of it: the name the user gave it
+/// (`/name`; pi generates no title), the latest prompt typed, and when it
+/// was last written. `None` when it cannot be read.
+pub fn pi_session(file: &Path) -> Option<SessionInfo> {
+    let (mut f, len, modified_at) = open_session(file)?;
+    let (id, _cwd) = pi_header(&read_at(&mut f, 0, HEAD.min(len))?)?;
+    // pi appends, so the end holds the latest name and prompt; a name set
+    // long ago (or a turn that wrote more than a window) may be only at the
+    // start.
+    let start = len.saturating_sub(WINDOW);
+    let mut found = PiFound::default();
+    found.scan(&read_at(&mut f, start, len - start)?, start > 0);
+    if start > 0 && !found.complete() {
+        let mut earlier = PiFound::default();
+        earlier.scan(&read_at(&mut f, 0, WINDOW)?, false);
+        found.fill_from(earlier);
+    }
+    Some(SessionInfo {
+        id,
+        title: found.title.as_deref().and_then(clean),
+        last_prompt: found.prompt.as_deref().and_then(clean),
+        modified_at,
+    })
+}
+
+/// pi's sessions of `dir` that have a name or a prompt, newest first: what
+/// a chat can be made from.
+pub fn pi_history(dir: &Path) -> Vec<SessionInfo> {
+    pi_project_dir(dir)
+        .map(|project| pi_history_of(&project, dir))
+        .unwrap_or_default()
+}
+
+/// [`pi_history`] of `project` (pi's directory for `dir`, or the one
+/// holding every project: a file's header then says where it ran).
+fn pi_history_of(project: &Path, dir: &Path) -> Vec<SessionInfo> {
+    let own = pi_owns(project, dir);
+    newest_first(
+        jsonl_files(project)
+            .iter()
+            .filter(|file| pi_ran_in(file, dir, own))
+            .filter_map(|file| pi_session(file))
+            .collect(),
+    )
+}
+
+/// The file of pi's session `session` run in `dir`, when it is there: pi
+/// names its files `<timestamp>_<session id>.jsonl`.
+pub fn pi_session_file(dir: &Path, session: &str) -> Option<PathBuf> {
+    pi_session_file_of(&pi_project_dir(dir)?, dir, session)
+}
+
+/// [`pi_session_file`] in `project`.
+fn pi_session_file_of(project: &Path, dir: &Path, session: &str) -> Option<PathBuf> {
+    if !valid_session(session) {
+        return None;
+    }
+    let suffix = format!("_{session}.jsonl");
+    let own = pi_owns(project, dir);
+    jsonl_files(project)
+        .into_iter()
+        .find(|file| names_session(file, &suffix) && pi_ran_in(file, dir, own))
+}
+
+/// Whether `file` is the file of the session whose file name ends `suffix`
+/// (`_<id>.jsonl`).
+fn names_session(file: &Path, suffix: &str) -> bool {
+    file.file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(suffix))
+}
+
+/// Whether `dir` (a project's, or the one every project is in) holds pi's
+/// session `session`.
+fn dir_holds_session(dir: &Path, session: &str) -> bool {
+    if !valid_session(session) {
+        return false;
+    }
+    let suffix = format!("_{session}.jsonl");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .any(|file| names_session(&file.path(), &suffix))
+}
+
+/// Whether `claude` holds a transcript of session `session`, in any of its
+/// project directories (the encoding of a directory is Claude's).
+fn claude_has_session(claude: &Path, session: &str) -> bool {
+    if !valid_session(session) {
+        return false;
+    }
+    let file = format!("{session}.jsonl");
+    let Ok(projects) = std::fs::read_dir(claude.join("projects")) else {
+        return false;
+    };
+    projects
+        .filter_map(|e| e.ok())
+        .any(|project| project.path().join(&file).is_file())
+}
+
+/// Whether Claude has a transcript of session `session` anywhere it keeps
+/// them. `true` when Claude's directory is unknown (nothing to look in).
+pub fn claude_session_anywhere(session: &str) -> bool {
+    match claude_dir() {
+        Some(claude) => claude_has_session(&claude, session),
+        None => true,
+    }
+}
+
+/// Whether pi has session `session` anywhere tam looks: in its project's
+/// directory, or in the one every project is in. `true` when pi's
+/// directory is unknown (nothing to look in).
+pub fn pi_session_anywhere(session: &str) -> bool {
+    match pi_session_dir() {
+        Some(flat) => dir_holds_session(&flat, session),
+        None => match pi_dir() {
+            Some(pi) => {
+                let Ok(projects) = std::fs::read_dir(pi.join("sessions")) else {
+                    return false;
+                };
+                projects.filter_map(|e| e.ok()).any(|project| {
+                    project.path().is_dir() && dir_holds_session(&project.path(), session)
+                })
+            }
+            None => true,
+        },
+    }
+}
+
+/// What pi's lines say of a session (see [`pi_session`]): the latest
+/// `session_info` and the last user message.
+#[derive(Default)]
+struct PiFound {
+    title: Option<String>,
+    /// Whether a `session_info` was seen: a name taken back is not one an
+    /// earlier line gives again.
+    named: bool,
+    prompt: Option<String>,
+}
+
+impl PiFound {
+    /// Read `bytes`, a part of the file. `mid_line`: it starts inside a
+    /// line, which is skipped. A line cut at the end does not parse, and is
+    /// skipped too.
+    fn scan(&mut self, bytes: &[u8], mid_line: bool) {
+        #[derive(Deserialize)]
+        struct Line {
+            #[serde(rename = "type")]
+            kind: String,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            message: Option<Message>,
+        }
+        #[derive(Deserialize)]
+        struct Message {
+            #[serde(default)]
+            role: Option<String>,
+            #[serde(default)]
+            content: Option<serde_json::Value>,
+        }
+
+        let mut lines = bytes.split(|&b| b == b'\n');
+        if mid_line {
+            lines.next();
+        }
+        for line in lines {
+            // Most lines are neither: no JSON parsed for them.
+            if !contains(line, b"session_info") && !contains(line, b"\"user\"") {
+                continue;
+            }
+            let Ok(line) = serde_json::from_slice::<Line>(line) else {
+                continue;
+            };
+            match line.kind.as_str() {
+                "session_info" => {
+                    self.named = true;
+                    self.title = line.name;
+                }
+                "message" => {
+                    let Some(message) = line.message else {
+                        continue;
+                    };
+                    if message.role.as_deref() != Some("user") {
+                        continue;
+                    }
+                    if let Some(text) = message.content.as_ref().and_then(text_of) {
+                        if !text.trim().is_empty() {
+                            self.prompt = Some(text);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn complete(&self) -> bool {
+        self.named && self.prompt.is_some()
+    }
+
+    /// Take from `earlier` (the start of the file) what this has not.
+    fn fill_from(&mut self, earlier: PiFound) {
+        if !self.named {
+            self.title = earlier.title;
+            self.named = earlier.named;
+        }
+        self.prompt = self.prompt.take().or(earlier.prompt);
+    }
+}
+
+/// The text of a pi message's content: a string, or its text blocks.
+fn text_of(content: &serde_json::Value) -> Option<String> {
+    match content {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(blocks) => {
+            let texts: Vec<&str> = blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(serde_json::Value::as_str))
+                .collect();
+            (!texts.is_empty()).then(|| texts.join("\n"))
+        }
+        _ => None,
+    }
+}
+
+// --- the agents' files, as chats read them ---
+
+/// What a session's file says of it, in the files of `agent` (`claude` or
+/// `pi`): its title, its latest prompt, and when it was last written.
+/// `None` for an agent whose files tam does not read.
+pub fn read(agent: &str, file: &Path) -> Option<SessionInfo> {
+    match agent {
+        "claude" => claude_session(file),
+        "pi" => pi_session(file),
+        _ => None,
+    }
+}
+
+/// The sessions of `agent` run in `dir` (a repository's main checkout) that
+/// have a title or a prompt, newest first: what a chat can be made from.
+/// None for an agent whose files tam does not read.
+pub fn history(agent: &str, dir: &Path) -> Vec<SessionInfo> {
+    match agent {
+        "claude" => claude_dir()
+            .map(|claude| claude_history(&claude, dir))
+            .unwrap_or_default(),
+        "pi" => pi_history(dir),
+        _ => Vec::new(),
+    }
+}
+
+/// The file of session `session` run in `dir` by `agent`, when it is there,
+/// for an agent whose files tam reads.
+pub fn session_file(agent: &str, dir: &Path, session: &str) -> Option<PathBuf> {
+    match agent {
+        "claude" => {
+            let claude = claude_dir()?;
+            claude_session_file(&claude, dir, session).filter(|file| file.is_file())
+        }
+        "pi" => pi_session_file(dir, session),
+        _ => None,
+    }
+}
+
+/// Whether `session` can name a session: not empty, not a path.
+fn valid_session(session: &str) -> bool {
+    !session.is_empty() && !session.contains(['/', '\\']) && !session.starts_with('.')
 }
 
 /// `len` bytes of `f` from `start` (fewer if it shrank meanwhile).
@@ -333,7 +721,7 @@ mod tests {
     fn session(dir: &Path, id: &str, lines: &[String]) -> SessionInfo {
         let file = dir.join(format!("{id}.jsonl"));
         write(&file, lines);
-        read(&file).unwrap()
+        claude_session(&file).unwrap()
     }
 
     #[test]
@@ -368,11 +756,14 @@ mod tests {
     fn session_files_are_in_the_project_of_their_directory() {
         let claude = Path::new("/c");
         assert_eq!(
-            session_file(claude, Path::new("/src/api"), S1),
+            claude_session_file(claude, Path::new("/src/api"), S1),
             Some(PathBuf::from(format!("/c/projects/-src-api/{S1}.jsonl")))
         );
         for bad in ["", "../x", "a/b", ".hidden", "a\\b"] {
-            assert_eq!(session_file(claude, Path::new("/src/api"), bad), None);
+            assert_eq!(
+                claude_session_file(claude, Path::new("/src/api"), bad),
+                None
+            );
         }
     }
 
@@ -498,7 +889,10 @@ mod tests {
             bytes[start..].starts_with(inner.as_bytes()),
             "window misplaced"
         );
-        assert_eq!(read(&file).unwrap().title.as_deref(), Some("Real"));
+        assert_eq!(
+            claude_session(&file).unwrap().title.as_deref(),
+            Some("Real")
+        );
     }
 
     #[test]
@@ -516,9 +910,9 @@ mod tests {
             ],
         );
         assert_eq!(s.title.as_deref(), Some("Mine"));
-        assert_eq!(read(&tmp.path().join("missing.jsonl")), None);
+        assert_eq!(claude_session(&tmp.path().join("missing.jsonl")), None);
         std::fs::create_dir(tmp.path().join("dir.jsonl")).unwrap();
-        assert_eq!(read(&tmp.path().join("dir.jsonl")), None);
+        assert_eq!(claude_session(&tmp.path().join("dir.jsonl")), None);
     }
 
     #[test]
@@ -570,7 +964,7 @@ mod tests {
         set_mtime(&file("named"), 2_000);
         set_mtime(&file("blank"), 4_000);
 
-        let history = history(claude, repo);
+        let history = claude_history(claude, repo);
         let ids: Vec<&str> = history.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["new", "named", "old"]);
         assert_eq!(
@@ -582,6 +976,275 @@ mod tests {
                 modified_at: 1_000,
             }
         );
-        assert!(super::history(claude, Path::new("/src/none")).is_empty());
+        assert!(super::claude_history(claude, Path::new("/src/none")).is_empty());
+    }
+
+    // --- pi ---
+
+    const PI_ID: &str = "0f9c1b7e-3a2d-4c5e-8b6a-1d2e3f4a5b6c";
+
+    fn pi_header_line(id: &str, cwd: &Path) -> String {
+        serde_json::json!({
+            "type": "session",
+            "version": 3,
+            "id": id,
+            "timestamp": "2024-12-03T14:00:00.000Z",
+            "cwd": cwd,
+        })
+        .to_string()
+    }
+
+    fn pi_name(name: &str) -> String {
+        serde_json::json!({"type": "session_info", "id": "n1", "parentId": null,
+                           "timestamp": "2024-12-03T14:00:00.000Z", "name": name})
+        .to_string()
+    }
+
+    fn pi_nameless() -> String {
+        serde_json::json!({"type": "session_info", "id": "n2", "parentId": "n1",
+                           "timestamp": "2024-12-03T14:00:00.000Z", "name": null})
+        .to_string()
+    }
+
+    fn pi_user(text: &str) -> String {
+        serde_json::json!({"type": "message", "id": "m1", "parentId": null,
+                           "timestamp": "2024-12-03T14:00:01.000Z",
+                           "message": {"role": "user", "content": text, "timestamp": 1}})
+        .to_string()
+    }
+
+    fn pi_user_blocks(text: &str) -> String {
+        serde_json::json!({"type": "message", "id": "m2", "parentId": "m1",
+                           "timestamp": "2024-12-03T14:00:01.000Z",
+                           "message": {"role": "user",
+                                       "content": [{"type": "text", "text": text}],
+                                       "timestamp": 1}})
+        .to_string()
+    }
+
+    fn pi_assistant(text: &str) -> String {
+        serde_json::json!({"type": "message", "id": "m3", "parentId": "m2",
+                           "timestamp": "2024-12-03T14:00:02.000Z",
+                           "message": {"role": "assistant",
+                                       "content": [{"type": "text", "text": text}],
+                                       "stopReason": "stop", "timestamp": 2}})
+        .to_string()
+    }
+
+    /// A pi session file in `dir`, as pi names it.
+    fn pi_file(dir: &Path, id: &str, lines: &[String]) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let file = dir.join(format!("2024-12-03T14-25-00-000Z_{id}.jsonl"));
+        write(&file, lines);
+        file
+    }
+
+    #[test]
+    fn pi_project_names_are_pis() {
+        assert_eq!(
+            pi_project_name(Path::new("/home/user/Workspace/tam")),
+            "--home-user-Workspace-tam--"
+        );
+        assert_eq!(pi_project_name(Path::new("/")), "----");
+        // A path with what pi makes a dash, and one it leaves alone.
+        assert_eq!(pi_project_name(Path::new("/a b/c:d")), "--a b-c-d--");
+        assert_eq!(pi_project_name(Path::new("/")), "----");
+        assert_eq!(pi_project_name(Path::new("/")), "----");
+    }
+
+    #[test]
+    fn pi_sessions_read_the_name_the_user_gave_and_the_last_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = Path::new("/src/app");
+        let file = pi_file(
+            tmp.path(),
+            PI_ID,
+            &[
+                pi_header_line(PI_ID, cwd),
+                pi_user("first question"),
+                pi_assistant("an answer"),
+                pi_name("pool leak"),
+                pi_user_blocks("and the tests"),
+            ],
+        );
+        let session = pi_session(&file).unwrap();
+        assert_eq!(session.id, PI_ID);
+        assert_eq!(session.title.as_deref(), Some("pool leak"));
+        // The latest user message, blocks joined, one line.
+        assert_eq!(session.last_prompt.as_deref(), Some("and the tests"));
+
+        // A name taken back: pi writes an empty one.
+        let file = pi_file(
+            tmp.path(),
+            "1a2b3c4d-0000-4000-8000-000000000002",
+            &[
+                pi_header_line("1a2b3c4d-0000-4000-8000-000000000002", cwd),
+                pi_name("gone"),
+                pi_nameless(),
+            ],
+        );
+        assert_eq!(pi_session(&file).unwrap().title, None);
+        // Nothing of it: no title, no prompt.
+        let file = pi_file(
+            tmp.path(),
+            "1a2b3c4d-0000-4000-8000-000000000003",
+            &[
+                pi_header_line("1a2b3c4d-0000-4000-8000-000000000003", cwd),
+                pi_assistant("only I spoke"),
+            ],
+        );
+        let session = pi_session(&file).unwrap();
+        assert_eq!((session.title, session.last_prompt), (None, None));
+        // A file that is not a session's, and one that is not there.
+        let other = tmp.path().join("other.jsonl");
+        std::fs::write(&other, "{\"type\":\"message\"}\n").unwrap();
+        assert_eq!(pi_session(&other), None);
+        assert_eq!(pi_session(&tmp.path().join("missing.jsonl")), None);
+    }
+
+    #[test]
+    fn pi_reads_a_name_from_the_start_when_the_end_has_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = Path::new("/src/app");
+        // A name, then more than a window of turns.
+        let mut lines = vec![
+            pi_header_line(PI_ID, cwd),
+            pi_name("named early"),
+            pi_user("first"),
+        ];
+        for i in 0..3000 {
+            lines.push(pi_assistant(&format!("line {i} {}", "x".repeat(80))));
+        }
+        let file = pi_file(tmp.path(), PI_ID, &lines);
+        assert!(std::fs::metadata(&file).unwrap().len() > WINDOW);
+        let session = pi_session(&file).unwrap();
+        assert_eq!(session.title.as_deref(), Some("named early"));
+        // The last prompt is nowhere in the end's window: the start's is kept.
+        assert_eq!(session.last_prompt.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn claude_sessions_are_found_in_any_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path();
+        assert!(!claude_has_session(claude, "s1"), "no projects dir");
+        let project = claude.join("projects").join("-w-app-feat");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("s1.jsonl"), "{}\n").unwrap();
+        std::fs::create_dir_all(claude.join("projects").join("-w-other")).unwrap();
+
+        assert!(claude_has_session(claude, "s1"));
+        assert!(!claude_has_session(claude, "s2"));
+        // Not a session id: never looked up as a path.
+        assert!(!claude_has_session(claude, ""));
+        assert!(!claude_has_session(claude, "../projects/-w-app-feat/s1"));
+    }
+
+    #[test]
+    fn pi_sessions_are_found_by_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = "0f9c1b7e-3a2d-4c5e-8b6a-1d2e3f4a5b6c";
+        pi_file(tmp.path(), id, &[pi_header_line(id, Path::new("/src/app"))]);
+        assert!(dir_holds_session(tmp.path(), id));
+        assert!(!dir_holds_session(
+            tmp.path(),
+            "11111111-2222-3333-4444-555555555555"
+        ));
+        // Nothing that could leave the directory.
+        for bad in ["", "..", "a/b", "0f9c1b7e-3a2d-4c5e-8b6a-1d2e3f4a5b6c/../x"] {
+            assert!(!dir_holds_session(tmp.path(), bad), "{bad}");
+        }
+        assert!(!dir_holds_session(&tmp.path().join("nope"), id));
+    }
+
+    #[test]
+    fn pi_history_and_session_files_are_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = Path::new("/src/app");
+        let project = tmp.path().join(pi_project_name(cwd));
+        let named = pi_file(
+            &project,
+            "1a2b3c4d-0000-4000-8000-000000000001",
+            &[
+                pi_header_line("1a2b3c4d-0000-4000-8000-000000000001", cwd),
+                pi_user("hello"),
+                pi_name("pool"),
+            ],
+        );
+        let asked = pi_file(
+            &project,
+            "1a2b3c4d-0000-4000-8000-000000000002",
+            &[
+                pi_header_line("1a2b3c4d-0000-4000-8000-000000000002", cwd),
+                pi_user("just a question"),
+            ],
+        );
+        // A session nobody typed in says nothing worth listing.
+        pi_file(
+            &project,
+            "1a2b3c4d-0000-4000-8000-000000000003",
+            &[
+                pi_header_line("1a2b3c4d-0000-4000-8000-000000000003", cwd),
+                pi_assistant("nothing asked"),
+            ],
+        );
+        set_mtime(&named, 2_000);
+        set_mtime(&asked, 3_000);
+
+        let history = pi_history_of(&project, cwd);
+        let ids: Vec<&str> = history.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "1a2b3c4d-0000-4000-8000-000000000002",
+                "1a2b3c4d-0000-4000-8000-000000000001"
+            ]
+        );
+        assert_eq!(history[0].last_prompt.as_deref(), Some("just a question"));
+        assert_eq!(history[1].title.as_deref(), Some("pool"));
+
+        // By id: the file, and nothing for an id no file has, nor for a path.
+        let found =
+            pi_session_file_of(&project, cwd, "1a2b3c4d-0000-4000-8000-000000000002").unwrap();
+        assert_eq!(found, asked);
+        assert_eq!(
+            pi_session_file_of(&project, cwd, "11111111-2222-3333-4444-555555555555"),
+            None
+        );
+        for bad in ["", "..", "a/b"] {
+            assert_eq!(pi_session_file_of(&project, cwd, bad), None, "{bad}");
+        }
+
+        // The one directory every project is in: only its own sessions.
+        let flat = tmp.path().join("flat");
+        std::fs::create_dir_all(&flat).unwrap();
+        let elsewhere = pi_file(
+            &flat,
+            "1a2b3c4d-0000-4000-8000-000000000004",
+            &[
+                pi_header_line(
+                    "1a2b3c4d-0000-4000-8000-000000000004",
+                    Path::new("/src/other"),
+                ),
+                pi_user("not this repository"),
+            ],
+        );
+        let mine = pi_file(
+            &flat,
+            "1a2b3c4d-0000-4000-8000-000000000005",
+            &[
+                pi_header_line("1a2b3c4d-0000-4000-8000-000000000005", cwd),
+                pi_user("this one"),
+            ],
+        );
+        set_mtime(&elsewhere, 1_000);
+        set_mtime(&mine, 2_000);
+        let history = pi_history_of(&flat, cwd);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, "1a2b3c4d-0000-4000-8000-000000000005");
+        assert_eq!(
+            pi_session_file_of(&flat, cwd, "1a2b3c4d-0000-4000-8000-000000000004"),
+            None
+        );
     }
 }

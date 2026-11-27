@@ -133,7 +133,7 @@ pub async fn start(new: NewChat) -> Result<()> {
             client.keep_chat(&chat.id, true).await?;
         }
         client
-            .run_agent(&chat.id, start.session, start.prompt, start.args)
+            .run_chat_agent(&chat, start.session, start.prompt, start.args)
             .await
     }
     .await;
@@ -180,7 +180,7 @@ fn repository(repo: Option<&str>) -> Result<PathBuf> {
 /// `tam run CHAT`, attaching: start the chat's agent in its session.
 pub async fn run_and_attach(client: &mut Client, chat: &ChatInfo, start: Start) -> Result<()> {
     let (id, _) = client
-        .run_agent(&chat.id, start.session, start.prompt, start.args)
+        .run_chat_agent(chat, start.session, start.prompt, start.args)
         .await
         .map_err(|e| cannot_resume(chat, e))?;
     let client = Client::connect().await?;
@@ -196,7 +196,7 @@ pub async fn start_detached(
     json: bool,
 ) -> Result<()> {
     match client
-        .run_agent(&chat.id, start.session, start.prompt, start.args)
+        .run_chat_agent(chat, start.session, start.prompt, start.args)
         .await
         .map_err(|e| cannot_resume(chat, e))
     {
@@ -349,11 +349,26 @@ pub async fn close(target: &str, yes: bool, json: bool) -> Result<()> {
         return print_json(&schema::ChatDoc::new(&closed, false));
     }
     match &closed.session {
-        Some(session) => println!(
-            "Closed chat {}. To make it again: tam chat {} --session {session}",
-            describe(&closed),
-            crate::shorten_home(&closed.dir.display().to_string())
-        ),
+        // `tam chat` runs the configured agent: a chat of another one is
+        // made again once that agent is configured.
+        Some(session) => {
+            let configured = crate::config::load_config()
+                .map(|config| config.agent)
+                .unwrap_or_else(|_| tam_proto::default_provider());
+            let hint = if configured == closed.provider {
+                String::new()
+            } else {
+                format!(
+                    " (its agent is {}: set [agent] program = \"{}\" first)",
+                    closed.provider, closed.provider
+                )
+            };
+            println!(
+                "Closed chat {}. To make it again: tam chat {} --session {session}{hint}",
+                describe(&closed),
+                crate::shorten_home(&closed.dir.display().to_string())
+            );
+        }
         None => println!("Closed chat {}.", describe(&closed)),
     }
     Ok(())
@@ -411,6 +426,7 @@ mod tests {
             name: name.map(str::to_string),
             repo: "api".into(),
             dir: "/src/api".into(),
+            provider: "claude".into(),
             created_at: 10,
             keep: true,
             session: Some("s-1".into()),
@@ -567,7 +583,7 @@ mod tests {
     fn chats_are_described_by_label_and_id() {
         assert_eq!(describe(&info(None)), "c-0000abcd");
         assert_eq!(describe(&info(Some("debug"))), "'debug' (c-0000abcd)");
-        // Claude's title, when the user gave no name.
+        // Its session's title, when the user gave no name.
         let titled = ChatInfo {
             title: Some("Fix the login".into()),
             ..info(None)

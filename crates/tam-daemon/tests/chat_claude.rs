@@ -256,7 +256,8 @@ async fn a_chats_claude_agent() {
     // gave it.
     let resolved = api.canonicalize().unwrap();
     let transcript_of = |session: &str| {
-        let file = tam_daemon::sessions::session_file(&claude_dir, &resolved, session).unwrap();
+        let file =
+            tam_daemon::sessions::claude_session_file(&claude_dir, &resolved, session).unwrap();
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         let title = json!({"type": "ai-title", "aiTitle": "Debug the API", "sessionId": session});
         std::fs::write(&file, format!("{title}\n")).unwrap();
@@ -274,6 +275,7 @@ async fn a_chats_claude_agent() {
     // Made from an existing session: its first agent resumes it.
     let chat = conn
         .chat(&Request::CreateChat {
+            provider: None,
             dir: api.clone(),
             name: Some("debug".into()),
             session: Some(SESSION.into()),
@@ -506,6 +508,7 @@ async fn a_chats_claude_agent() {
     assert!(transcript.is_file());
     let again = conn
         .chat(&Request::CreateChat {
+            provider: None,
             dir: api.clone(),
             name: None,
             session: closed.session.clone(),
@@ -521,6 +524,7 @@ async fn a_chats_claude_agent() {
     // While it holds that session, no other chat is made from it.
     let refused = conn
         .request(&Request::CreateChat {
+            provider: None,
             dir: api.clone(),
             name: None,
             session: Some(SESSION.into()),
@@ -531,6 +535,7 @@ async fn a_chats_claude_agent() {
     // A session that is not one of the repository's is refused at once.
     match conn
         .request(&Request::CreateChat {
+            provider: None,
             dir: api.clone(),
             name: None,
             session: Some("no-such-session".into()),
@@ -546,6 +551,7 @@ async fn a_chats_claude_agent() {
     let file = transcript_of(gone);
     let missing = conn
         .chat(&Request::CreateChat {
+            provider: None,
             dir: api.clone(),
             name: None,
             session: Some(gone.into()),
